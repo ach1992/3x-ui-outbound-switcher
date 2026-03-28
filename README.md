@@ -1,12 +1,12 @@
 # 3X-UI Outbound Switcher
 
-**Version:** v1.0.0
+**Version:** v1.0.6
 
 Switch between outbound by your priority on 3X-UI.
 
 ## What it does
 
-`3x-ui-outbound-switcher` runs on the same server where **3x-ui** is installed and automatically switches the active Xray outbound based on your outbound tag priority.
+`3X-UI Outbound Switcher` runs on the same server where **3x-ui** is installed and automatically switches the active Xray outbound based on your outbound tag priority.
 
 Priority is derived from outbound tag names that start with uppercase letters:
 
@@ -264,6 +264,15 @@ Default HTTP probe URLs, used only in `http` mode:
 - `http://connectivitycheck.gstatic.com/generate_204`
 - `https://www.msftconnecttest.com/connecttest.txt`
 
+## v1.0.6 fixes and improvements
+
+- Fixed the `jq: --arg takes two parameters` bug in state handling
+- Switched the default health-check mode to **panel**
+- Added support for the same 3x-ui outbound test endpoint used by the UI
+- Added automatic fallback from `panel` probe to `tcp` when panel probing errors internally
+- Improved config extraction from `getConfigJson` responses that are wrapped instead of raw
+- Kept `tcp` and `http` modes available as fallbacks
+
 ## Uninstall
 
 From the menu:
@@ -283,3 +292,11 @@ Or directly:
 ## License
 
 MIT
+
+
+## What changed in v1.0.6
+
+- Uses consistent lowercase/hyphenated paths only
+- Cleans up legacy paths from older broken builds automatically during install and uninstall
+- Validates and patches the real local `config.json` during outbound switching
+- Timer uses `OnUnitInactiveSec` to avoid overlap between runs

@@ -2,12 +2,14 @@
 set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
-APP_VERSION="v1.0.4"
+APP_TITLE="3X-UI Outbound Switcher"
+APP_VERSION="v1.0.6"
 REPO_URL="https://github.com/ach1992/3x-ui-outbound-switcher"
 RAW_BASE="https://raw.githubusercontent.com/ach1992/3x-ui-outbound-switcher/main"
 INSTALL_DIR="/opt/${APP_NAME}"
 TMP_DIR="/tmp/${APP_NAME}-install.$$"
 OFFLINE_DIR="/root/${APP_NAME}"
+LEGACY_NAMES=("3X-UI Outbound Switcher" "3x-ui outbound switcher")
 
 say() { printf '%b\n' "$*"; }
 info() { say "[INFO] $*"; }
@@ -21,6 +23,20 @@ require_root() {
 }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+
+cleanup_legacy_artifacts() {
+  local legacy
+  for legacy in "${LEGACY_NAMES[@]}"; do
+    systemctl disable --now "${legacy}.timer" >/dev/null 2>&1 || true
+    systemctl stop "${legacy}.service" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${legacy}.service" "/etc/systemd/system/${legacy}.timer"
+    rm -f "/usr/local/bin/${legacy}" "/run/${legacy}.lock" "/tmp/${legacy}_login_resp.json" "/tmp/${legacy}_restart_resp.json"
+    rm -rf "/opt/${legacy}" "/etc/${legacy}" "/var/lib/${legacy}" "/var/log/${legacy}" "/tmp/${legacy}"
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed >/dev/null 2>&1 || true
+}
 
 ask_yes_no() {
   local prompt="$1"
@@ -59,7 +75,7 @@ copy_from_dir() {
 install_online() {
   ensure_basic_tools
   mkdir -p "$TMP_DIR"
-  info "Downloading ${APP_NAME} ${APP_VERSION} from GitHub..."
+  info "Downloading ${APP_TITLE} ${APP_VERSION} from GitHub..."
   curl -fsSL "${RAW_BASE}/xui-switcher.sh" -o "$TMP_DIR/xui-switcher.sh" || die "Failed to download xui-switcher.sh"
   curl -fsSL "${RAW_BASE}/uninstall.sh" -o "$TMP_DIR/uninstall.sh" || die "Failed to download uninstall.sh"
   copy_from_dir "$TMP_DIR"
@@ -79,8 +95,9 @@ trap cleanup EXIT
 
 main() {
   require_root
+  cleanup_legacy_artifacts
   say "============================================================"
-  say "  ${APP_NAME} ${APP_VERSION}"
+  say "  ${APP_TITLE} ${APP_VERSION}"
   say "============================================================"
   say "Repository : ${REPO_URL}"
   say "Install    : Online by default, optional offline from ${OFFLINE_DIR}"

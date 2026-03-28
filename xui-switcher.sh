@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -Euo pipefail
 
-APP_NAME="3X-UI Outbound Switcher"
-APP_VERSION="v1.0.0"
+APP_NAME="3x-ui-outbound-switcher"
+APP_TITLE="3X-UI Outbound Switcher"
+APP_VERSION="v1.0.6"
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 ENV_FILE="${ENV_DIR}/switcher.env"
@@ -20,6 +21,7 @@ SYMLINK_PATH="/usr/local/bin/${APP_NAME}"
 DEFAULT_CONFIG_PATH="/usr/local/x-ui/bin/config.json"
 DEFAULT_XRAY_BIN="/usr/local/x-ui/bin/xray-linux-amd64"
 FALLBACK_RESTART_CMD="systemctl restart x-ui"
+LEGACY_NAMES=("3X-UI Outbound Switcher" "3x-ui outbound switcher")
 
 DEPS_UPDATED=0
 LAST_ERROR=""
@@ -89,7 +91,7 @@ trap cleanup_tmp EXIT
 ensure_lock() {
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
-    die "Another ${APP_NAME} process is already running." || return 1
+    die "Another ${APP_TITLE} process is already running." || return 1
   fi
 }
 
@@ -103,6 +105,19 @@ normalize_url() {
 
 trim_spaces() {
   sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+cleanup_legacy_paths() {
+  local legacy
+  for legacy in "${LEGACY_NAMES[@]}"; do
+    systemctl disable --now "${legacy}.timer" >/dev/null 2>&1 || true
+    systemctl stop "${legacy}.service" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${legacy}.service" "/etc/systemd/system/${legacy}.timer"
+    rm -f "/usr/local/bin/${legacy}" "/run/${legacy}.lock" "/tmp/${legacy}_login_resp.json" "/tmp/${legacy}_restart_resp.json"
+    rm -rf "/opt/${legacy}" "/etc/${legacy}" "/var/lib/${legacy}" "/var/log/${legacy}" "/tmp/${legacy}"
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed >/dev/null 2>&1 || true
 }
 
 load_env() {
@@ -150,7 +165,7 @@ mask_secret() {
 header() {
   clear >/dev/null 2>&1 || true
   say "${COL_BLUE}============================================================${COL_RESET}"
-  say "${COL_CYAN}  ${APP_NAME} ${APP_VERSION}${COL_RESET}"
+  say "${COL_CYAN}  ${APP_TITLE} ${APP_VERSION}${COL_RESET}"
   say "${COL_BLUE}============================================================${COL_RESET}"
   say "Repository : https://github.com/ach1992/3x-ui-outbound-switcher"
   say "Purpose    : Switch between outbound by your priority on 3X-UI"
@@ -884,6 +899,7 @@ show_detected_tags() {
 interactive_install_or_reconfigure() {
   require_root || return 1
   ensure_dependencies || return 1
+  cleanup_legacy_paths
   detect_defaults
   load_env
 
@@ -944,7 +960,12 @@ interactive_install_or_reconfigure() {
       rm -f "$cfg"
 
       if prompt_yes_no "Enable auto-run timer now?" "Y"; then
-        systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1 && success "Timer enabled." || warn "Could not enable timer."
+        if systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1; then
+          success "Timer enabled."
+        else
+          warn "Could not enable timer. Showing recent timer status:"
+          systemctl status "${APP_NAME}.timer" --no-pager || true
+        fi
       else
         systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
         warn "Timer left disabled."

@@ -2,6 +2,9 @@
 set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
+APP_TITLE="3X-UI Outbound Switcher"
+APP_VERSION="v1.0.6"
+LEGACY_NAMES=("3X-UI Outbound Switcher" "3x-ui outbound switcher")
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 STATE_DIR="/var/lib/${APP_NAME}"
@@ -37,10 +40,33 @@ ask_yes_no() {
   done
 }
 
+cleanup_current() {
+  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
+  systemctl stop "${APP_NAME}.service" >/dev/null 2>&1 || true
+  rm -f "$SERVICE_FILE" "$TIMER_FILE"
+  rm -f "$SYMLINK_PATH"
+  rm -rf "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
+  rm -f "/run/${APP_NAME}.lock" "/tmp/${APP_NAME}_login_resp.json" "/tmp/${APP_NAME}_restart_resp.json"
+  rm -rf "/tmp/${APP_NAME}"
+}
+
+cleanup_legacy() {
+  local legacy
+  for legacy in "${LEGACY_NAMES[@]}"; do
+    systemctl disable --now "${legacy}.timer" >/dev/null 2>&1 || true
+    systemctl stop "${legacy}.service" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${legacy}.service" "/etc/systemd/system/${legacy}.timer"
+    rm -f "/usr/local/bin/${legacy}" "/run/${legacy}.lock" "/tmp/${legacy}_login_resp.json" "/tmp/${legacy}_restart_resp.json"
+    rm -rf "/opt/${legacy}" "/etc/${legacy}" "/var/lib/${legacy}" "/var/log/${legacy}" "/tmp/${legacy}"
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed >/dev/null 2>&1 || true
+}
+
 main() {
   require_root
   say "============================================================"
-  say "  ${APP_NAME} uninstall"
+  say "  ${APP_NAME} uninstall ${APP_VERSION}"
   say "============================================================"
 
   if ! ask_yes_no "Remove ${APP_NAME} from this server?" "Y"; then
@@ -48,21 +74,14 @@ main() {
     exit 0
   fi
 
-  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
-  systemctl stop "${APP_NAME}.service" >/dev/null 2>&1 || true
-  rm -f "$SERVICE_FILE" "$TIMER_FILE"
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl reset-failed >/dev/null 2>&1 || true
-
-  rm -f "$SYMLINK_PATH"
-  rm -rf "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
-  rm -f "/run/${APP_NAME}.lock"
+  cleanup_current
+  cleanup_legacy
 
   if ask_yes_no "Remove saved Xray config backups (*.bak.*) from /usr/local/x-ui/bin?" "N"; then
     rm -f /usr/local/x-ui/bin/config.json.bak.*
   fi
 
-  say "[OK] ${APP_NAME} has been removed."
+  say "[OK] ${APP_NAME} and legacy artifacts have been removed."
 }
 
 main "$@"
