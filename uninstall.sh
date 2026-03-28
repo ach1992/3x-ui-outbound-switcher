@@ -3,7 +3,7 @@ set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
 APP_TITLE="3X-UI Outbound Switcher"
-APP_VERSION="v1.0.8"
+APP_VERSION="v1.0.10"
 LEGACY_NAMES=("3X-UI Outbound Switcher" "3x-ui outbound switcher")
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"

@@ -3,7 +3,7 @@ set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
 APP_TITLE="3X-UI Outbound Switcher"
-APP_VERSION="v1.0.8"
+APP_VERSION="v1.0.10"
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 ENV_FILE="${ENV_DIR}/switcher.env"
@@ -1076,26 +1076,43 @@ interactive_install_or_reconfigure() {
       fi
       rm -f "$cfg"
 
-      if prompt_yes_no "Enable auto-run timer now?" "Y"; then
-        if systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1; then
-          success "Timer enabled."
-        else
-          warn "Could not enable timer. Showing recent timer status:"
-          systemctl status "${APP_NAME}.timer" --no-pager || true
-        fi
-      else
-        systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
-        warn "Timer left disabled."
-      fi
+      
+local timer_just_enabled=0
+if prompt_yes_no "Enable auto-run timer now?" "Y"; then
+  if systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1; then
+    success "Timer enabled."
+    timer_just_enabled=1
+  else
+    warn "Could not enable timer. Showing recent timer status:"
+    systemctl status "${APP_NAME}.timer" --no-pager || true
+  fi
+else
+  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
+  warn "Timer left disabled."
+fi
 
-      if prompt_yes_no "Run one health check now?" "Y"; then
-        if perform_failover_check; then
-          success "Health check finished."
-        else
-          err "Health check failed. Review the log or configuration."
-        fi
-      fi
-      return 0
+if [[ "$timer_just_enabled" -eq 1 ]] && (service_active || lock_exists); then
+  info "Auto-run has already started. Skipping manual health check to avoid overlap."
+else
+  if prompt_yes_no "Run one health check now?" "Y"; then
+    if service_active || lock_exists; then
+      warn "A check is already running. Please wait for it to finish, then try again."
+    elif perform_failover_check; then
+      success "Health check finished."
+    else
+      err "Health check failed. Review the log or configuration."
+    fi
+  fi
+fi
+
+if prompt_yes_no "Run self-test now?" "Y"; then
+  if self_test_summary; then
+    success "Self-test finished successfully."
+  else
+    warn "Self-test reported one or more issues."
+  fi
+fi
+return 0
     fi
 
     err "Configuration validation failed. Please review your input and try again."
@@ -1236,14 +1253,15 @@ menu() {
 2) Show current config
 3) Validate current Xray config
 4) Start one check now
-5) Start service once
-6) Stop auto-run timer
-7) Restart auto-run timer
-8) Show status
-9) Show logs
-10) Enable auto-run timer
-11) Disable auto-run timer
-12) Uninstall
+5) Run self-test
+6) Start service once
+7) Stop auto-run timer
+8) Restart auto-run timer
+9) Show status
+10) Show logs
+11) Enable auto-run timer
+12) Disable auto-run timer
+13) Uninstall
 0) Exit
 MENU
     echo
@@ -1252,15 +1270,23 @@ MENU
       1) menu_action "Install / Reconfigure" interactive_install_or_reconfigure; pause ;;
       2) menu_action "Show current config" show_current_config; pause ;;
       3) menu_action "Validate current Xray config" validate_current_config; pause ;;
-      4) menu_action "Run health check" perform_failover_check && success "Check finished."; pause ;;
-      5) menu_action "Start service once" start_service; pause ;;
-      6) menu_action "Stop auto-run timer" stop_timer; pause ;;
-      7) menu_action "Restart auto-run timer" restart_timer; pause ;;
-      8) menu_action "Show status" show_status; pause ;;
-      9) show_logs ;;
-      10) menu_action "Enable auto-run timer" enable_timer; pause ;;
-      11) menu_action "Disable auto-run timer" disable_timer; pause ;;
-      12) uninstall_app ;;
+      4)
+        if service_active || lock_exists; then
+          warn "A check is already running. Please wait for it to finish, then try again."
+        else
+          menu_action "Run health check" perform_failover_check && success "Check finished."
+        fi
+        pause
+        ;;
+      5) self_test_summary; pause ;;
+      6) menu_action "Start service once" start_service; pause ;;
+      7) menu_action "Stop auto-run timer" stop_timer; pause ;;
+      8) menu_action "Restart auto-run timer" restart_timer; pause ;;
+      9) menu_action "Show status" show_status; pause ;;
+      10) show_logs ;;
+      11) menu_action "Enable auto-run timer" enable_timer; pause ;;
+      12) menu_action "Disable auto-run timer" disable_timer; pause ;;
+      13) uninstall_app ;;
       0) exit 0 ;;
       *) err "Invalid choice. Please enter a valid menu number."; sleep 1 ;;
     esac
