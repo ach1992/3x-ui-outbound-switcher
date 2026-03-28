@@ -3,7 +3,7 @@ set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
 APP_TITLE="3X-UI Outbound Switcher"
-APP_VERSION="v1.0.6"
+APP_VERSION="v1.0.8"
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 ENV_FILE="${ENV_DIR}/switcher.env"
@@ -91,11 +91,128 @@ trap cleanup_tmp EXIT
 ensure_lock() {
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
-    die "Another ${APP_TITLE} process is already running." || return 1
+    die "${APP_TITLE} is already running. If you just enabled the timer, wait for the current run to finish or stop the service first." || return 1
   fi
 }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+service_active() {
+  systemctl is-active --quiet "${APP_NAME}.service"
+}
+
+timer_active() {
+  systemctl is-active --quiet "${APP_NAME}.timer"
+}
+
+lock_exists() {
+  [[ -e "$LOCK_FILE" ]]
+}
+
+wait_for_service_stop() {
+  local max_wait="${1:-30}"
+  local i
+  for ((i=0; i<max_wait; i++)); do
+    if ! service_active; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+self_test_summary() {
+  local failures=0
+  local api_cfg=""
+  local current_tag=""
+  local first_tag=""
+  local probe_ok=0
+
+  say ""
+  say "${COL_BLUE}==================== Self-Test Summary ====================${COL_RESET}"
+
+  if panel_login; then
+    success "Panel login: OK"
+  else
+    err "Panel login: FAILED"
+    failures=$((failures+1))
+  fi
+
+  api_cfg="$(mktemp)"
+  if panel_get_config "$api_cfg"; then
+    success "Config fetch from panel API: OK"
+  else
+    err "Config fetch from panel API: FAILED"
+    failures=$((failures+1))
+  fi
+
+  if [[ -f "$CONFIG_PATH" ]]; then
+    if validate_config "$CONFIG_PATH"; then
+      success "Local config validation: OK"
+    else
+      err "Local config validation: FAILED"
+      failures=$((failures+1))
+    fi
+  else
+    err "Local config path missing: $CONFIG_PATH"
+    failures=$((failures+1))
+  fi
+
+  if [[ -f "$api_cfg" ]] && [[ -s "$api_cfg" ]]; then
+    if read_priority_tags_from_config "$api_cfg"; then
+      success "Prioritized outbound discovery: OK (${#PRIORITY_TAGS[@]} found)"
+      if [[ ${#PRIORITY_TAGS[@]} -gt 0 ]]; then
+        first_tag="${PRIORITY_TAGS[0]}"
+      fi
+    else
+      err "Prioritized outbound discovery: FAILED"
+      failures=$((failures+1))
+    fi
+
+    current_tag="$(get_current_active_tag_from_config "$api_cfg" || true)"
+    if [[ -n "$current_tag" && "$current_tag" != "null" ]]; then
+      success "Current routing outbound detected: ${current_tag}"
+    else
+      err "Current routing outbound detection: FAILED"
+      failures=$((failures+1))
+    fi
+  fi
+
+  if [[ -n "$first_tag" ]]; then
+    if probe_tag "$api_cfg" "$first_tag"; then
+      success "Probe test on first prioritized outbound (${first_tag}): OK"
+      probe_ok=1
+    else
+      err "Probe test on first prioritized outbound (${first_tag}): FAILED"
+      failures=$((failures+1))
+    fi
+  else
+    warn "Probe test skipped: no prioritized outbound was found."
+  fi
+
+  if timer_active; then
+    success "Timer status: active"
+  else
+    info "Timer status: not active"
+  fi
+
+  if service_active; then
+    info "Service status: active"
+  else
+    info "Service status: inactive"
+  fi
+
+  rm -f "$api_cfg"
+
+  say "${COL_BLUE}===========================================================${COL_RESET}"
+  if [[ "$failures" -eq 0 ]]; then
+    success "Self-test passed."
+    return 0
+  else
+    err "Self-test completed with ${failures} issue(s)."
+    return 1
+  fi
+}
 
 normalize_url() {
   local url="$1"

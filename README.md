@@ -1,6 +1,6 @@
 # 3X-UI Outbound Switcher
 
-**Version:** v1.0.6
+**Version:** v1.0.8
 
 Switch between outbound by your priority on 3X-UI.
 
@@ -264,7 +264,7 @@ Default HTTP probe URLs, used only in `http` mode:
 - `http://connectivitycheck.gstatic.com/generate_204`
 - `https://www.msftconnecttest.com/connecttest.txt`
 
-## v1.0.6 fixes and improvements
+## v1.0.8 fixes and improvements
 
 - Fixed the `jq: --arg takes two parameters` bug in state handling
 - Switched the default health-check mode to **panel**
@@ -294,9 +294,33 @@ Or directly:
 MIT
 
 
-## What changed in v1.0.6
+## What changed in v1.0.8
 
 - Uses consistent lowercase/hyphenated paths only
 - Cleans up legacy paths from older broken builds automatically during install and uninstall
 - Validates and patches the real local `config.json` during outbound switching
 - Timer uses `OnUnitInactiveSec` to avoid overlap between runs
+
+
+## Important behavior after install
+
+If you enable the auto-run timer during installation, the timer may immediately start the first check.
+To avoid overlap, the installer now skips the manual `Run one health check now` step whenever the timer/service is already running.
+
+If you want to run a manual check right away, choose `N` for auto-run during install, finish setup, then run the CLI manually.
+
+
+
+## Self-test
+
+Version v1.0.8 adds a built-in self-test. It can be run:
+- automatically at the end of install/reconfigure
+- manually from the CLI menu via `Run self-test`
+
+The self-test checks:
+- 3x-ui panel login
+- config fetch from panel API
+- local `config.json` validation
+- prioritized outbound discovery from tags like `A-...`, `B-...`
+- one live probe against the first prioritized outbound
+- current timer/service status
