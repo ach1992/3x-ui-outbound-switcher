@@ -1,6 +1,6 @@
-# 3x-ui-outbound-switcher
+# 3X-UI Outbound Switcher
 
-**Version:** v1.0.3
+**Version:** v1.0.0
 
 Switch between outbound by your priority on 3X-UI.
 
@@ -263,15 +263,6 @@ Default HTTP probe URLs, used only in `http` mode:
 - `https://cp.cloudflare.com/generate_204`
 - `http://connectivitycheck.gstatic.com/generate_204`
 - `https://www.msftconnecttest.com/connecttest.txt`
-
-## v1.0.3 fixes and improvements
-
-- Fixed the `jq: --arg takes two parameters` bug in state handling
-- Switched the default health-check mode to **panel**
-- Added support for the same 3x-ui outbound test endpoint used by the UI
-- Added automatic fallback from `panel` probe to `tcp` when panel probing errors internally
-- Improved config extraction from `getConfigJson` responses that are wrapped instead of raw
-- Kept `tcp` and `http` modes available as fallbacks
 
 ## Uninstall
 

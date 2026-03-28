@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Euo pipefail
 
-APP_NAME="3x-ui-outbound-switcher"
-APP_VERSION="v1.0.3"
+APP_NAME="3X-UI Outbound Switcher"
+APP_VERSION="v1.0.0"
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 ENV_FILE="${ENV_DIR}/switcher.env"
@@ -816,11 +816,11 @@ SERVICE
 
   cat > "$TIMER_FILE" <<TIMER
 [Unit]
-Description=Run ${APP_NAME} every 20 seconds
+Description=Run ${APP_NAME} after each completed interval
 
 [Timer]
 OnBootSec=20s
-OnUnitActiveSec=20s
+OnUnitInactiveSec=20s
 AccuracySec=1s
 Unit=${APP_NAME}.service
 

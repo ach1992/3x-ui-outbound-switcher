@@ -2,7 +2,7 @@
 set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
-APP_VERSION="v1.0.3"
+APP_VERSION="v1.0.4"
 REPO_URL="https://github.com/ach1992/3x-ui-outbound-switcher"
 RAW_BASE="https://raw.githubusercontent.com/ach1992/3x-ui-outbound-switcher/main"
 INSTALL_DIR="/opt/${APP_NAME}"
