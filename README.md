@@ -1,34 +1,34 @@
 # 3x-ui-outbound-switcher
 
-**Version:** `v1.0.0`
+**Version:** v1.0.1
 
 Switch between outbound by your priority on 3X-UI.
 
-This project runs on the **same server where 3x-ui is installed** and automatically switches the active outbound in Xray routing based on outbound health and your tag priority.
+## What it does
 
-Priority is derived from outbound tag names such as:
+`3x-ui-outbound-switcher` runs on the same server where **3x-ui** is installed and automatically switches the active Xray outbound based on your outbound tag priority.
 
-- `A-Main-Out`
+Priority is derived from outbound tag names that start with uppercase letters:
+
+- `A-Primary-Out`
 - `B-Backup-Out`
-- `C-350-Star`
-- `D-350-shayan-WS`
-- `E-Test-Out`
+- `C-Node-1`
+- `D-Node-2`
 
-The switcher reads outbounds directly from the current 3x-ui `config.json` fetched via the panel API. It only modifies the **last routing rule that contains both `network` and `outboundTag`**, validates the config with Xray, writes it to disk, and restarts Xray through the 3x-ui API with a fallback to `systemctl restart x-ui`.
+The switcher checks outbound health, keeps fail/success counters, and updates only the active routing rule when a switch is needed.
 
-## Features
+## Key features
 
-- Priority by tag prefix: `A-`, `B-`, `C-`, ...
-- Reads outbounds from 3x-ui config automatically
-- Health checks each prioritized outbound through a temporary local Xray probe
-- Automatic failover after consecutive failures
-- Automatic recovery back to higher-priority outbound after consecutive successes
-- 3x-ui API login, config download, and restart support
-- Fallback restart with `systemctl restart x-ui`
-- Online install and offline install support
-- Interactive CLI menu
-- Logs, state tracking, validation, timer control, uninstall support
-- Designed for Debian and Ubuntu
+- Priority from outbound tag names like `A-...`, `B-...`, `C-...`
+- Reads outbound tags directly from the live 3x-ui config
+- Uses 3x-ui API for login, config fetch, and Xray restart
+- Falls back to `systemctl restart x-ui` if API restart fails
+- Supports online install and offline install
+- Interactive CLI menu after install
+- Systemd timer for automatic checks every 20 seconds
+- Config validation before every switch
+- Backup of `config.json` before every switch
+- Logs and state files for troubleshooting
 
 ## Supported systems
 
@@ -39,149 +39,154 @@ The switcher reads outbounds directly from the current 3x-ui `config.json` fetch
 - Debian 12
 - Debian 13
 
-## Naming rule for outbound tags
+## Important notes
 
-Only outbounds with tags matching this pattern are considered prioritized:
+- This project must be installed on the **same server** where 3x-ui is installed.
+- Only outbound tags matching `^[A-Z]-` are treated as prioritized outbounds.
+- The switcher does **not** rename your outbounds. You must name them yourself.
+- The switcher updates only the **last routing rule** that contains both `network` and `outboundTag`.
+- Default probe behavior uses **multiple probe URLs**. A probe is considered successful if **any one** of them works through the outbound path.
 
-```text
-^[A-Z]-
-```
+## Why multiple probe URLs?
 
-Examples:
+Using only one probe URL can create false negatives.
 
-```text
-A-Main-Out
-B-Backup-Out
-C-350-Star
-D-350-shayan-WS
-E-Test-Out
-```
+Example:
+- your server is in Iran
+- direct internet access to one external site is blocked
+- but the outbound itself is healthy and can still reach other destinations
 
-If a tag does not start with `A-` to `Z-`, the switcher ignores it.
+To reduce false negatives, v1.0.1 uses comma-separated probe URLs and tries them one by one through the outbound SOCKS probe.
+
+Default probe URLs:
+
+- `https://cp.cloudflare.com/generate_204`
+- `http://connectivitycheck.gstatic.com/generate_204`
+- `https://www.msftconnecttest.com/connecttest.txt`
+
+You can change them during install or later from the CLI.
+
+## Priority naming example
+
+Use generic names like these:
+
+- `A-Primary-Out`
+- `B-Backup-Out`
+- `C-Node-1`
+- `D-Node-2`
+- `E-Node-3`
+
+Alphabetical order defines priority.
 
 ## Online install
 
-Run this one-liner on the same server where 3x-ui is installed:
+After you push these files to your GitHub repository, users can install with:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ach1992/3x-ui-outbound-switcher/main/install.sh)
 ```
 
-What happens next:
+The installer will:
 
-1. The installer downloads the required files.
-2. It installs the command as:
-   ```bash
-   /usr/local/bin/3x-ui-outbound-switcher
-   ```
-3. It **automatically launches** the interactive CLI menu.
-4. The CLI asks for your 3x-ui panel URL, username, password, config path, and Xray binary path.
-5. It validates everything before saving.
+1. install only required missing dependencies
+2. avoid `apt-get update` unless package install actually fails
+3. copy files into `/opt/3x-ui-outbound-switcher`
+4. create `/usr/local/bin/3x-ui-outbound-switcher`
+5. automatically launch the interactive setup menu
 
 ## Offline install
 
-Use this when the server has no internet access.
+Offline install is supported for servers without internet access.
 
-### 1) Prepare files on another machine
+### Prepare the files on another machine
 
-Download or clone this repository and make sure these files exist:
+Download or clone the repository and place these files inside a folder named exactly:
+
+```text
+/root/3x-ui-outbound-switcher
+```
+
+Required files:
 
 - `install.sh`
 - `uninstall.sh`
 - `xui-switcher.sh`
 - `README.md`
 
-### 2) Upload them to the server
+### Move the folder to the target server
 
-Copy the repository folder to this exact path:
+Copy that folder to the target server so it becomes:
 
-```bash
+```text
 /root/3x-ui-outbound-switcher
 ```
 
-Example expected structure:
-
-```text
-/root/3x-ui-outbound-switcher/install.sh
-/root/3x-ui-outbound-switcher/uninstall.sh
-/root/3x-ui-outbound-switcher/xui-switcher.sh
-/root/3x-ui-outbound-switcher/README.md
-```
-
-### 3) Run the installer
-
-You can run either:
+### Run the installer
 
 ```bash
-bash /root/3x-ui-outbound-switcher/install.sh
+cd /root/3x-ui-outbound-switcher
+bash install.sh
 ```
 
-or if you already copied it somewhere else and an offline package exists in `/root/3x-ui-outbound-switcher`, the installer will detect it and ask whether you want to install **offline** or **online**.
+If the installer detects that offline files exist in `/root/3x-ui-outbound-switcher`, it asks whether to install **offline** or **online**.
 
-If the offline package is not found, the installer automatically proceeds with online installation and does not ask.
+If the offline folder does not exist, installer goes **online automatically** and does not ask.
 
-## Dependency handling
+## Interactive setup
 
-The installer does **not** run `apt update` automatically.
+After install, the script launches the setup wizard and asks for:
 
-It only tries to install missing required packages when needed, such as:
+- 3x-ui panel base URL
+- 3x-ui username
+- 3x-ui password
+- `config.json` path
+- Xray binary path
+- fail threshold
+- recover threshold
+- minimum switch gap
+- probe timeout
+- probe URLs
 
-- `curl`
-- `jq`
-- `util-linux` (for `flock`, if missing)
-
-If a dependency already exists, it is not installed again.
-
-## Default paths commonly used with 3x-ui
-
-Typical values on many 3x-ui systems:
+### Example panel URL
 
 ```text
-config.json: /usr/local/x-ui/bin/config.json
-xray binary: /usr/local/x-ui/bin/xray-linux-amd64
+http://127.0.0.1:2053/your-base-path
 ```
 
-Your panel URL may look like this:
+or
 
 ```text
-http://SERVER_IP:PORT/PANEL_BASE_PATH
+http://your-server-ip:2090/your-base-path
 ```
 
-Example:
+## Menu
 
-```text
-http://193.242.125.37:2090/ach
-```
-
-## CLI command
-
-After installation, the main command is:
+The installed command is:
 
 ```bash
 3x-ui-outbound-switcher
 ```
 
-You can run it anytime to open the interactive menu.
+Menu options:
 
-### CLI menu actions
+1. Install / Reconfigure
+2. Show current config
+3. Validate current Xray config
+4. Start one check now
+5. Start service once
+6. Stop auto-run timer
+7. Restart auto-run timer
+8. Show status
+9. Show logs
+10. Enable auto-run timer
+11. Disable auto-run timer
+12. Uninstall
+0. Exit
 
-- Install / Reconfigure
-- Show current config
-- Validate current Xray config
-- Start one check now
-- Start service once
-- Stop auto-run timer
-- Restart auto-run timer
-- Show status
-- Show logs
-- Enable auto-run timer
-- Disable auto-run timer
-- Uninstall
-- Exit
-
-### Non-interactive commands
+## CLI commands
 
 ```bash
+3x-ui-outbound-switcher
 3x-ui-outbound-switcher install
 3x-ui-outbound-switcher show-config
 3x-ui-outbound-switcher validate
@@ -197,96 +202,74 @@ You can run it anytime to open the interactive menu.
 3x-ui-outbound-switcher version
 ```
 
-## How switching works
+## Files and locations
 
-- The switcher downloads the current 3x-ui config via API.
-- It discovers prioritized outbounds from tags like `A-...`, `B-...`, `C-...`.
-- It health-checks each one using a temporary local Xray probe.
-- If the current outbound fails `FAIL_THRESHOLD` consecutive times, it switches to the first healthy higher-priority choice available by order.
-- If a higher-priority outbound becomes healthy again for `RECOVER_THRESHOLD` consecutive checks, it switches back.
-- A minimum time gap between switches is enforced.
+- App directory: `/opt/3x-ui-outbound-switcher`
+- Env file: `/etc/3x-ui-outbound-switcher/switcher.env`
+- State file: `/var/lib/3x-ui-outbound-switcher/state.json`
+- Main log: `/var/log/3x-ui-outbound-switcher/switcher.log`
+- Action log: `/var/log/3x-ui-outbound-switcher/actions.log`
+- CLI symlink: `/usr/local/bin/3x-ui-outbound-switcher`
 
-Default values:
+## Logs
 
-- `FAIL_THRESHOLD=3`
-- `RECOVER_THRESHOLD=2`
-- `MIN_SWITCH_GAP=60`
-- `PROBE_TIMEOUT=8`
-- `PROBE_URL=http://connectivitycheck.gstatic.com/generate_204`
-
-## Systemd service and timer
-
-The installer creates:
-
-- `/etc/systemd/system/3x-ui-outbound-switcher.service`
-- `/etc/systemd/system/3x-ui-outbound-switcher.timer`
-
-The timer runs every **20 seconds**.
-
-Useful commands:
+Show live logs:
 
 ```bash
-systemctl status 3x-ui-outbound-switcher.timer --no-pager
-systemctl status 3x-ui-outbound-switcher.service --no-pager
-journalctl -u 3x-ui-outbound-switcher.service -f
-```
-
-## Logs and state
-
-Main paths:
-
-```text
-Env file   : /etc/3x-ui-outbound-switcher/switcher.env
-State file : /var/lib/3x-ui-outbound-switcher/state.json
-Main log   : /var/log/3x-ui-outbound-switcher/switcher.log
-Action log : /var/log/3x-ui-outbound-switcher/actions.log
-```
-
-Useful commands:
-
-```bash
-tail -f /var/log/3x-ui-outbound-switcher/switcher.log
-tail -f /var/log/3x-ui-outbound-switcher/actions.log
-cat /var/lib/3x-ui-outbound-switcher/state.json | jq
-```
-
-## Uninstall
-
-Using the CLI:
-
-```bash
-3x-ui-outbound-switcher uninstall
+3x-ui-outbound-switcher logs
 ```
 
 Or directly:
 
 ```bash
-bash /opt/3x-ui-outbound-switcher/uninstall.sh
+tail -f /var/log/3x-ui-outbound-switcher/switcher.log
 ```
 
-The uninstaller removes:
+Switch actions are stored in:
 
-- systemd service and timer
-- installed scripts
-- symlink command
-- env file
-- state
-- logs
-- lock file
+```bash
+/var/log/3x-ui-outbound-switcher/actions.log
+```
 
-It also asks whether you want to remove config backup files.
+## Service behavior
 
-## Security notes
+- A systemd timer runs every 20 seconds.
+- A switch happens only if the active outbound fails enough times.
+- Recovery back to a higher-priority outbound requires enough consecutive successes.
+- A minimum switch gap prevents rapid flapping.
 
-- The panel password is stored in the local env file so the timer can run unattended.
-- The env file is saved with `chmod 600`.
-- After first setup, it is a good idea to use a dedicated 3x-ui admin account with only the permissions you need.
-- Keep repository access and server shell access restricted.
+## Default values
 
-## MIT License
+- Fail threshold: `3`
+- Recover threshold: `2`
+- Minimum switch gap: `60`
+- Probe timeout: `8`
+- Probe URLs: `https://cp.cloudflare.com/generate_204,http://connectivitycheck.gstatic.com/generate_204,https://www.msftconnecttest.com/connecttest.txt`
 
-This project is intended to be released under the MIT License.
+## v1.0.1 fixes and improvements
 
-## Disclaimer
+- Fixed broken ANSI color output in the header
+- Prevented setup from exiting immediately on invalid input at the final validation step
+- Added support for multiple probe URLs to reduce false negatives
+- Improved install flow to retry package install with `apt-get update` only when necessary
+- Kept example outbound names generic in the documentation
 
-Use at your own risk. Always test on your own server before relying on automatic failover in production.
+## Uninstall
+
+From the menu:
+
+```bash
+3x-ui-outbound-switcher
+```
+
+Choose `Uninstall`.
+
+Or directly:
+
+```bash
+3x-ui-outbound-switcher uninstall
+```
+
+## License
+
+MIT

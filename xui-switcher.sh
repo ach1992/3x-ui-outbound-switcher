@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
-APP_VERSION="v1.0.0"
+APP_VERSION="v1.0.1"
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 ENV_FILE="${ENV_DIR}/switcher.env"
@@ -21,34 +21,57 @@ DEFAULT_CONFIG_PATH="/usr/local/x-ui/bin/config.json"
 DEFAULT_XRAY_BIN="/usr/local/x-ui/bin/xray-linux-amd64"
 FALLBACK_RESTART_CMD="systemctl restart x-ui"
 
+DEPS_UPDATED=0
+LAST_ERROR=""
+
 mkdir -p "$STATE_DIR" "$LOG_DIR" "$TMP_BASE"
 
-COL_RESET='\033[0m'
-COL_BLUE='\033[1;34m'
-COL_CYAN='\033[1;36m'
-COL_GREEN='\033[1;32m'
-COL_YELLOW='\033[1;33m'
-COL_RED='\033[1;31m'
+setup_colors() {
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    COL_RESET=$'\033[0m'
+    COL_BLUE=$'\033[1;34m'
+    COL_CYAN=$'\033[1;36m'
+    COL_GREEN=$'\033[1;32m'
+    COL_YELLOW=$'\033[1;33m'
+    COL_RED=$'\033[1;31m'
+    COL_BOLD=$'\033[1m'
+  else
+    COL_RESET=''
+    COL_BLUE=''
+    COL_CYAN=''
+    COL_GREEN=''
+    COL_YELLOW=''
+    COL_RED=''
+    COL_BOLD=''
+  fi
+}
+setup_colors
 
 log() {
   mkdir -p "$LOG_DIR"
-  echo "$(date '+%F %T') $*" | tee -a "$SCRIPT_LOG" >/dev/null
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$SCRIPT_LOG"
 }
 
 action_log() {
   mkdir -p "$LOG_DIR"
-  echo "$(date '+%F %T') $*" | tee -a "$ACTION_LOG" >/dev/null
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$ACTION_LOG"
 }
 
-say() { printf "%b\n" "$*"; }
+say() { printf '%b\n' "$*"; }
 info() { say "${COL_CYAN}[INFO]${COL_RESET} $*"; }
 success() { say "${COL_GREEN}[OK]${COL_RESET} $*"; }
 warn() { say "${COL_YELLOW}[WARN]${COL_RESET} $*"; }
 err() { say "${COL_RED}[ERROR]${COL_RESET} $*"; }
 
 die() {
+  LAST_ERROR="$*"
   err "$*"
-  exit 1
+  log "ERROR: $*"
+  return 1
+}
+
+pause() {
+  read -r -p "Press Enter to continue..." _
 }
 
 require_root() {
@@ -63,9 +86,11 @@ trap cleanup_tmp EXIT
 ensure_lock() {
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
-    die "Another ${APP_NAME} process is already running."
+    die "Another ${APP_NAME} process is already running." || return 1
   fi
 }
+
+command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 normalize_url() {
   local url="$1"
@@ -73,11 +98,22 @@ normalize_url() {
   printf '%s' "$url"
 }
 
+trim_spaces() {
+  sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 load_env() {
   if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     PANEL_URL="$(normalize_url "${PANEL_URL:-}")"
+    if [[ -n "${PROBE_URLS:-}" ]]; then
+      PROBE_URLS="$(printf '%s' "$PROBE_URLS" | tr -d ' ' )"
+    elif [[ -n "${PROBE_URL:-}" ]]; then
+      PROBE_URLS="${PROBE_URL}"
+    else
+      PROBE_URLS="https://cp.cloudflare.com/generate_204,http://connectivitycheck.gstatic.com/generate_204,https://www.msftconnecttest.com/connecttest.txt"
+    fi
   fi
 }
 
@@ -93,7 +129,7 @@ FAIL_THRESHOLD="${FAIL_THRESHOLD}"
 RECOVER_THRESHOLD="${RECOVER_THRESHOLD}"
 MIN_SWITCH_GAP="${MIN_SWITCH_GAP}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT}"
-PROBE_URL="${PROBE_URL}"
+PROBE_URLS="${PROBE_URLS}"
 ENVEOF
   chmod 600 "$ENV_FILE"
 }
@@ -109,24 +145,16 @@ mask_secret() {
 }
 
 header() {
-  clear || true
-  cat <<HDR
-${COL_BLUE}============================================================${COL_RESET}
-${COL_CYAN}  ${APP_NAME} ${APP_VERSION}${COL_RESET}
-${COL_BLUE}============================================================${COL_RESET}
-Repository : https://github.com/ach1992/3x-ui-outbound-switcher
-Purpose    : Switch between outbound by your priority on 3X-UI
-Priority   : Derived from outbound tags like A-..., B-..., C-...
-Platform   : Ubuntu 22/24/25, Debian 11/12/13
-${COL_BLUE}============================================================${COL_RESET}
-HDR
+  clear >/dev/null 2>&1 || true
+  say "${COL_BLUE}============================================================${COL_RESET}"
+  say "${COL_CYAN}  ${APP_NAME} ${APP_VERSION}${COL_RESET}"
+  say "${COL_BLUE}============================================================${COL_RESET}"
+  say "Repository : https://github.com/ach1992/3x-ui-outbound-switcher"
+  say "Purpose    : Switch between outbound by your priority on 3X-UI"
+  say "Priority   : Derived from outbound tags like A-..., B-..., C-..."
+  say "Platform   : Ubuntu 22/24/25, Debian 11/12/13"
+  say "${COL_BLUE}============================================================${COL_RESET}"
 }
-
-pause() {
-  read -r -p "Press Enter to continue..." _
-}
-
-command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 pkg_install_if_missing() {
   local pkg="$1"
@@ -134,24 +162,50 @@ pkg_install_if_missing() {
   if command_exists "$bin"; then
     return 0
   fi
+
   info "Installing missing dependency: ${pkg}"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if (( DEPS_UPDATED == 0 )); then
+    warn "Initial package install failed. Running apt-get update once and retrying."
+    if ! apt-get update >/dev/null 2>&1; then
+      return 1
+    fi
+    DEPS_UPDATED=1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+
+  return 1
 }
 
 ensure_dependencies() {
-  require_root
-  command_exists apt-get || die "This installer supports Debian/Ubuntu only."
-
-  pkg_install_if_missing curl curl || die "Failed to install curl."
-  pkg_install_if_missing jq jq || die "Failed to install jq."
-
-  command_exists flock || pkg_install_if_missing util-linux flock || die "Failed to install util-linux/flock."
-  command_exists timeout || die "timeout command is required but not found."
-  command_exists systemctl || die "systemctl is required but not found."
+  require_root || return 1
+  command_exists apt-get || die "This installer supports Debian and Ubuntu only." || return 1
+  pkg_install_if_missing curl curl || die "Failed to install curl." || return 1
+  pkg_install_if_missing jq jq || die "Failed to install jq." || return 1
+  command_exists flock || pkg_install_if_missing util-linux flock || die "Failed to install util-linux / flock." || return 1
+  command_exists timeout || die "The 'timeout' command is required but was not found." || return 1
+  command_exists systemctl || die "systemctl is required but was not found." || return 1
 }
 
 validate_url() {
   [[ "$1" =~ ^https?://.+ ]]
+}
+
+validate_probe_urls() {
+  local urls="$1"
+  local url
+  [[ -n "$urls" ]] || return 1
+  IFS=',' read -r -a _probe_urls <<< "$urls"
+  for url in "${_probe_urls[@]}"; do
+    url="$(printf '%s' "$url" | trim_spaces)"
+    [[ -n "$url" ]] || continue
+    validate_url "$url" || return 1
+  done
+  return 0
 }
 
 prompt_nonempty() {
@@ -191,9 +245,10 @@ prompt_number() {
 prompt_yes_no() {
   local prompt="$1"
   local default="${2:-Y}"
-  local value
+  local value alt
+  if [[ "${default^^}" == "Y" ]]; then alt="N"; else alt="Y"; fi
   while true; do
-    read -r -p "$prompt [${default}/$( [[ "$default" == "Y" ]] && echo N || echo Y )]: " value
+    read -r -p "$prompt [$default/$alt]: " value
     value="${value:-$default}"
     case "${value^^}" in
       Y|YES) return 0 ;;
@@ -216,15 +271,15 @@ detect_defaults() {
 }
 
 validate_local_paths() {
-  [[ -f "$CONFIG_PATH" ]] || die "Config file not found: $CONFIG_PATH"
-  [[ -x "$XRAY_BIN" ]] || die "Xray binary not executable: $XRAY_BIN"
+  [[ -f "$CONFIG_PATH" ]] || die "Config file not found: $CONFIG_PATH" || return 1
+  [[ -x "$XRAY_BIN" ]] || die "Xray binary is not executable: $XRAY_BIN" || return 1
 }
 
 panel_login() {
   rm -f "$COOKIE_JAR"
   local code
   code="$({
-    curl -sS -o /tmp/${APP_NAME}_login_resp.json -w "%{http_code}" \
+    curl -sS -o "/tmp/${APP_NAME}_login_resp.json" -w "%{http_code}" \
       -c "$COOKIE_JAR" \
       -H "Content-Type: application/json" \
       -X POST "${PANEL_URL}/login" \
@@ -252,7 +307,7 @@ panel_get_config() {
 panel_restart_xray() {
   local code
   code="$({
-    curl -sS -o /tmp/${APP_NAME}_restart_resp.json -w "%{http_code}" \
+    curl -sS -o "/tmp/${APP_NAME}_restart_resp.json" -w "%{http_code}" \
       -b "$COOKIE_JAR" \
       -X POST "${PANEL_URL}/panel/api/server/restartXrayService"
   } || true)"
@@ -270,12 +325,11 @@ restart_xray_with_fallback() {
 read_priority_tags_from_config() {
   local cfg="$1"
   mapfile -t PRIORITY_TAGS < <(
-    jq -r '.outbounds[].tag' "$cfg" \
+    jq -r '.outbounds[]?.tag // empty' "$cfg" \
       | grep -E '^[A-Z]-' \
-      | grep -v -E '^(direct|blocked|api|metrics_out)$' \
       | sort
   )
-  [[ ${#PRIORITY_TAGS[@]} -gt 0 ]] || die "No prioritized outbound tags found. Use tags like A-Main-Out, B-Backup-Out, C-Node..."
+  [[ ${#PRIORITY_TAGS[@]} -gt 0 ]] || die "No prioritized outbound tags found. Use tags like A-Main-Out, B-Backup-Out, C-Node." || return 1
 }
 
 init_state() {
@@ -299,8 +353,7 @@ sync_state_tags() {
   jq --argjson tags "$tags_json" '
     .fail_counts = (reduce $tags[] as $t (.fail_counts // {}; .[$t] = (.[$t] // 0)))
     | .success_counts = (reduce $tags[] as $t (.success_counts // {}; .[$t] = (.[$t] // 0)))
-  ' "$STATE_FILE" > "$tmp"
-  mv "$tmp" "$STATE_FILE"
+  ' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 }
 
 state_get() { jq -r "$1" "$STATE_FILE"; }
@@ -309,13 +362,11 @@ state_set() {
   local expr="$1"
   local tmp
   tmp="$(mktemp)"
-  jq "$expr" "$STATE_FILE" > "$tmp"
-  mv "$tmp" "$STATE_FILE"
+  jq "$expr" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 }
 
 priority_index() {
-  local target="$1"
-  local i
+  local target="$1" i
   for i in "${!PRIORITY_TAGS[@]}"; do
     [[ "${PRIORITY_TAGS[$i]}" == "$target" ]] && { echo "$i"; return 0; }
   done
@@ -354,16 +405,12 @@ backup_config() {
 }
 
 load_outbound_json() {
-  local cfg="$1"
-  local tag="$2"
+  local cfg="$1" tag="$2"
   jq -c --arg tag "$tag" '.outbounds[] | select(.tag == $tag)' "$cfg"
 }
 
 build_probe_config() {
-  local cfg="$1"
-  local tag="$2"
-  local probe_dir="$3"
-  local port="$4"
+  local cfg="$1" tag="$2" probe_dir="$3" port="$4"
   local outbound_json
   outbound_json="$(load_outbound_json "$cfg" "$tag")"
   [[ -n "$outbound_json" ]] || return 1
@@ -394,10 +441,18 @@ build_probe_config() {
   ' > "${probe_dir}/config.json"
 }
 
+probe_url_through_proxy() {
+  local port="$1" url="$2"
+  timeout "$PROBE_TIMEOUT" curl -sS -o /dev/null \
+    --proxy "socks5h://127.0.0.1:${port}" \
+    --max-time "$PROBE_TIMEOUT" \
+    -L -f "$url"
+}
+
 probe_tag() {
-  local cfg="$1"
-  local tag="$2"
-  local probe_dir port xpid rc
+  local cfg="$1" tag="$2"
+  local probe_dir port xpid rc url
+  local -a urls
 
   probe_dir="$(mktemp -d "${TMP_BASE}/probe-XXXXXX")"
   port=$((RANDOM % 10000 + 20000))
@@ -409,13 +464,16 @@ probe_tag() {
   xpid=$!
   sleep 1
 
-  set +e
-  timeout "$PROBE_TIMEOUT" curl -sS -o /dev/null \
-    --proxy "socks5h://127.0.0.1:${port}" \
-    --max-time "$PROBE_TIMEOUT" \
-    -f "$PROBE_URL"
-  rc=$?
-  set -e
+  rc=1
+  IFS=',' read -r -a urls <<< "$PROBE_URLS"
+  for url in "${urls[@]}"; do
+    url="$(printf '%s' "$url" | trim_spaces)"
+    [[ -n "$url" ]] || continue
+    if probe_url_through_proxy "$port" "$url"; then
+      rc=0
+      break
+    fi
+  done
 
   kill "$xpid" >/dev/null 2>&1 || true
   wait "$xpid" >/dev/null 2>&1 || true
@@ -444,8 +502,7 @@ get_current_state_tag() { state_get '.current'; }
 get_last_switch_ts() { state_get '.last_switch_ts'; }
 
 set_current() {
-  local tag="$1"
-  local now
+  local tag="$1" now
   now="$(date +%s)"
   state_set --arg t "$tag" --argjson now "$now" '.current = $t | .last_switch_ts = $now'
 }
@@ -463,17 +520,22 @@ choose_best_available() {
 }
 
 apply_switch() {
-  local api_cfg="$1"
-  local new_tag="$2"
+  local api_cfg="$1" new_tag="$2"
   local idx tmp_cfg backup
 
   idx="$(find_target_rule_index "$api_cfg")"
-  [[ "$idx" != "-1" ]] || die "Target routing rule not found."
+  [[ "$idx" != "-1" ]] || die "Target routing rule not found." || return 1
 
   tmp_cfg="$(mktemp)"
-  jq --argjson idx "$idx" --arg tag "$new_tag" '.routing.rules[$idx].outboundTag = $tag' "$api_cfg" > "$tmp_cfg"
+  jq --argjson idx "$idx" --arg tag "$new_tag" '.routing.rules[$idx].outboundTag = $tag' "$api_cfg" > "$tmp_cfg" || {
+    rm -f "$tmp_cfg"
+    die "Failed to build modified config." || return 1
+  }
 
-  validate_config "$tmp_cfg" || { rm -f "$tmp_cfg"; die "Modified config failed validation."; }
+  if ! validate_config "$tmp_cfg"; then
+    rm -f "$tmp_cfg"
+    die "Modified config failed validation." || return 1
+  fi
 
   backup="$(backup_config)"
   cp -f "$tmp_cfg" "$CONFIG_PATH"
@@ -488,30 +550,30 @@ apply_switch() {
   log "ERROR: restart failed, restoring backup"
   cp -f "$backup" "$CONFIG_PATH"
   restart_xray_with_fallback || true
-  return 1
+  die "Switch failed and backup was restored." || return 1
 }
 
 perform_failover_check() {
-  require_root
-  ensure_lock
+  require_root || return 1
+  ensure_lock || return 1
   load_env
 
-  [[ -f "$ENV_FILE" ]] || die "Configuration not found. Run Install / Reconfigure first."
-  validate_local_paths
+  [[ -f "$ENV_FILE" ]] || die "Configuration not found. Run Install / Reconfigure first." || return 1
+  validate_local_paths || return 1
 
-  panel_login || die "3x-ui login failed. Check PANEL_URL, username, or password."
+  panel_login || die "3x-ui login failed. Check PANEL_URL, username, or password." || return 1
 
   local api_cfg
   api_cfg="$(mktemp)"
-  panel_get_config "$api_cfg" || { rm -f "$api_cfg"; die "Could not download config.json from 3x-ui API."; }
+  panel_get_config "$api_cfg" || { rm -f "$api_cfg"; die "Could not download config.json from 3x-ui API." || return 1; }
 
-  read_priority_tags_from_config "$api_cfg"
+  read_priority_tags_from_config "$api_cfg" || { rm -f "$api_cfg"; return 1; }
   init_state
   sync_state_tags
 
   local current_cfg_tag current_state_tag
   current_cfg_tag="$(get_current_active_tag_from_config "$api_cfg")"
-  [[ -n "$current_cfg_tag" && "$current_cfg_tag" != "null" ]] || { rm -f "$api_cfg"; die "Could not detect current active outboundTag from routing rules."; }
+  [[ -n "$current_cfg_tag" && "$current_cfg_tag" != "null" ]] || { rm -f "$api_cfg"; die "Could not detect current active outboundTag from routing rules." || return 1; }
 
   current_state_tag="$(get_current_state_tag)"
   if [[ "$current_state_tag" == "null" || -z "$current_state_tag" ]]; then
@@ -573,6 +635,7 @@ perform_failover_check() {
   fi
 
   rm -f "$api_cfg"
+  return 0
 }
 
 write_systemd_files() {
@@ -603,89 +666,126 @@ Unit=${APP_NAME}.service
 WantedBy=timers.target
 TIMER
 
-  systemctl daemon-reload
+  systemctl daemon-reload >/dev/null 2>&1 || return 1
 }
 
 validate_install_inputs() {
-  validate_url "$PANEL_URL" || die "Invalid PANEL_URL. Example: http://127.0.0.1:2053/ach"
-  validate_local_paths
-  panel_login || die "Login test failed. Please verify panel URL, username and password."
+  validate_url "$PANEL_URL" || die "Invalid PANEL_URL. Example: http://127.0.0.1:2053/ach" || return 1
+  validate_local_paths || return 1
+  validate_probe_urls "$PROBE_URLS" || die "Probe URLs must be comma-separated http/https URLs." || return 1
+  panel_login || die "Login test failed. Verify panel URL, username, and password." || return 1
 
   local tmp_cfg
   tmp_cfg="$(mktemp)"
-  panel_get_config "$tmp_cfg" || { rm -f "$tmp_cfg"; die "Could not fetch config via 3x-ui API. Make sure the panel is reachable and the URL base path is correct."; }
-  read_priority_tags_from_config "$tmp_cfg"
+  panel_get_config "$tmp_cfg" || { rm -f "$tmp_cfg"; die "Could not fetch config via 3x-ui API. Check the panel URL and base path." || return 1; }
+  read_priority_tags_from_config "$tmp_cfg" || { rm -f "$tmp_cfg"; return 1; }
   rm -f "$tmp_cfg"
 }
 
+configure_probe_urls() {
+  local default_urls="${PROBE_URLS:-https://cp.cloudflare.com/generate_204,http://connectivitycheck.gstatic.com/generate_204,https://www.msftconnecttest.com/connecttest.txt}"
+  while true; do
+    PROBE_URLS="$(prompt_nonempty 'Probe URLs (comma-separated, reachable through outbounds)' "$default_urls")"
+    PROBE_URLS="$(printf '%s' "$PROBE_URLS" | tr -d ' ')"
+    if validate_probe_urls "$PROBE_URLS"; then
+      break
+    fi
+    err "Please enter valid comma-separated http/https URLs."
+  done
+}
+
+show_detected_tags() {
+  local cfg="$1"
+  read_priority_tags_from_config "$cfg" || return 1
+  printf ' - %s\n' "${PRIORITY_TAGS[@]}"
+}
+
 interactive_install_or_reconfigure() {
-  require_root
-  ensure_dependencies
+  require_root || return 1
+  ensure_dependencies || return 1
   detect_defaults
   load_env
 
-  header
-  say "${COL_GREEN}Install / Reconfigure${COL_RESET}"
-  echo
+  while true; do
+    header
+    say "${COL_GREEN}Install / Reconfigure${COL_RESET}"
+    say "Leave password empty to keep the current saved password."
+    say "Use probe URLs reachable through your outbound path, not necessarily directly from the server."
+    echo
 
-  PANEL_URL="$(prompt_nonempty '3x-ui panel base URL' "${PANEL_URL:-http://127.0.0.1:2053}")"
-  PANEL_URL="$(normalize_url "$PANEL_URL")"
-  while ! validate_url "$PANEL_URL"; do
-    err "Invalid URL. Example: http://193.242.125.37:2090/ach"
-    PANEL_URL="$(prompt_nonempty '3x-ui panel base URL' "http://127.0.0.1:2053")"
+    PANEL_URL="$(prompt_nonempty '3x-ui panel base URL' "${PANEL_URL:-http://127.0.0.1:2053}")"
     PANEL_URL="$(normalize_url "$PANEL_URL")"
+    while ! validate_url "$PANEL_URL"; do
+      err "Invalid URL. Example: http://193.242.125.37:2090/ach"
+      PANEL_URL="$(prompt_nonempty '3x-ui panel base URL' "http://127.0.0.1:2053")"
+      PANEL_URL="$(normalize_url "$PANEL_URL")"
+    done
+
+    PANEL_USERNAME="$(prompt_nonempty '3x-ui username' "${PANEL_USERNAME:-admin}")"
+    while true; do
+      read -r -s -p "3x-ui password [leave empty to keep current if set]: " input_password
+      echo
+      PANEL_PASSWORD="${input_password:-${PANEL_PASSWORD:-}}"
+      if [[ -n "$PANEL_PASSWORD" ]]; then
+        break
+      fi
+      err "Password cannot be empty."
+    done
+
+    CONFIG_PATH="$(prompt_nonempty 'config.json path' "${CONFIG_PATH:-${DETECTED_CONFIG_PATH:-$DEFAULT_CONFIG_PATH}}")"
+    XRAY_BIN="$(prompt_nonempty 'xray binary path' "${XRAY_BIN:-${DETECTED_XRAY_BIN:-$DEFAULT_XRAY_BIN}}")"
+
+    FAIL_THRESHOLD="$(prompt_number 'Fail threshold (consecutive fails before switch)' "${FAIL_THRESHOLD:-3}")"
+    RECOVER_THRESHOLD="$(prompt_number 'Recover threshold (consecutive successes before switch back)' "${RECOVER_THRESHOLD:-2}")"
+    MIN_SWITCH_GAP="$(prompt_number 'Minimum seconds between switches' "${MIN_SWITCH_GAP:-60}")"
+    PROBE_TIMEOUT="$(prompt_number 'Probe timeout in seconds' "${PROBE_TIMEOUT:-8}")"
+    configure_probe_urls
+
+    mkdir -p "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
+    save_env
+    write_systemd_files || { err "Could not write systemd files."; pause; continue; }
+    load_env
+
+    if validate_install_inputs; then
+      ln -sf "${INSTALL_DIR}/xui-switcher.sh" "$SYMLINK_PATH"
+      success "Configuration saved."
+      local cfg
+      cfg="$(mktemp)"
+      if panel_get_config "$cfg"; then
+        info "Detected prioritized outbounds from config:"
+        show_detected_tags "$cfg" || true
+      fi
+      rm -f "$cfg"
+
+      if prompt_yes_no "Enable auto-run timer now?" "Y"; then
+        systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1 && success "Timer enabled." || warn "Could not enable timer."
+      else
+        systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
+        warn "Timer left disabled."
+      fi
+
+      if prompt_yes_no "Run one health check now?" "Y"; then
+        if perform_failover_check; then
+          success "Health check finished."
+        else
+          err "Health check failed. Review the log or configuration."
+        fi
+      fi
+      return 0
+    fi
+
+    err "Configuration validation failed. Please review your input and try again."
+    if ! prompt_yes_no "Retry configuration now?" "Y"; then
+      return 1
+    fi
   done
-
-  PANEL_USERNAME="$(prompt_nonempty '3x-ui username' "${PANEL_USERNAME:-admin}")"
-  read -r -s -p "3x-ui password [leave empty to keep current if set]: " input_password
-  echo
-  PANEL_PASSWORD="${input_password:-${PANEL_PASSWORD:-}}"
-  [[ -n "$PANEL_PASSWORD" ]] || die "Password cannot be empty."
-
-  CONFIG_PATH="$(prompt_nonempty 'config.json path' "${CONFIG_PATH:-${DETECTED_CONFIG_PATH:-$DEFAULT_CONFIG_PATH}}")"
-  XRAY_BIN="$(prompt_nonempty 'xray binary path' "${XRAY_BIN:-${DETECTED_XRAY_BIN:-$DEFAULT_XRAY_BIN}}")"
-
-  FAIL_THRESHOLD="$(prompt_number 'Fail threshold (consecutive fails before switch)' "${FAIL_THRESHOLD:-3}")"
-  RECOVER_THRESHOLD="$(prompt_number 'Recover threshold (consecutive successes before switch back)' "${RECOVER_THRESHOLD:-2}")"
-  MIN_SWITCH_GAP="$(prompt_number 'Minimum seconds between switches' "${MIN_SWITCH_GAP:-60}")"
-  PROBE_TIMEOUT="$(prompt_number 'Probe timeout in seconds' "${PROBE_TIMEOUT:-8}")"
-  PROBE_URL="$(prompt_nonempty 'Probe URL' "${PROBE_URL:-http://connectivitycheck.gstatic.com/generate_204}")"
-
-  mkdir -p "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
-  save_env
-  write_systemd_files
-  load_env
-  validate_install_inputs
-
-  ln -sf "${INSTALL_DIR}/xui-switcher.sh" "$SYMLINK_PATH"
-  success "Configuration saved."
-  info "Detected prioritized outbounds from config:" 
-  local cfg
-  cfg="$(mktemp)"
-  panel_get_config "$cfg"
-  read_priority_tags_from_config "$cfg"
-  printf ' - %s\n' "${PRIORITY_TAGS[@]}"
-  rm -f "$cfg"
-
-  if prompt_yes_no "Enable auto-run timer now?" "Y"; then
-    systemctl enable --now "${APP_NAME}.timer"
-    success "Timer enabled."
-  else
-    systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
-    warn "Timer left disabled."
-  fi
-
-  if prompt_yes_no "Run one health check now?" "Y"; then
-    perform_failover_check
-    success "Health check finished."
-  fi
 }
 
 show_current_config() {
-  require_root
+  require_root || return 1
   load_env
   header
-  [[ -f "$ENV_FILE" ]] || die "Configuration not found."
+  [[ -f "$ENV_FILE" ]] || die "Configuration not found." || return 1
 
   cat <<OUT
 Current settings
@@ -699,7 +799,7 @@ FAIL_THRESHOLD     : ${FAIL_THRESHOLD}
 RECOVER_THRESHOLD  : ${RECOVER_THRESHOLD}
 MIN_SWITCH_GAP     : ${MIN_SWITCH_GAP}
 PROBE_TIMEOUT      : ${PROBE_TIMEOUT}
-PROBE_URL          : ${PROBE_URL}
+PROBE_URLS         : ${PROBE_URLS}
 ENV_FILE           : ${ENV_FILE}
 STATE_FILE         : ${STATE_FILE}
 SCRIPT_LOG         : ${SCRIPT_LOG}
@@ -717,28 +817,28 @@ OUT
   local cfg
   cfg="$(mktemp)"
   if panel_login && panel_get_config "$cfg"; then
-    read_priority_tags_from_config "$cfg"
-    printf ' - %s\n' "${PRIORITY_TAGS[@]}"
+    show_detected_tags "$cfg" || true
   else
     warn "Could not fetch tags from panel API right now."
   fi
   rm -f "$cfg"
+  return 0
 }
 
 validate_current_config() {
-  require_root
+  require_root || return 1
   load_env
-  [[ -f "$ENV_FILE" ]] || die "Configuration not found."
-  validate_local_paths
+  [[ -f "$ENV_FILE" ]] || die "Configuration not found." || return 1
+  validate_local_paths || return 1
   if validate_config "$CONFIG_PATH"; then
     success "Xray config validation passed."
-  else
-    die "Xray config validation failed."
+    return 0
   fi
+  die "Xray config validation failed." || return 1
 }
 
 show_status() {
-  require_root
+  require_root || return 1
   header
   systemctl status "${APP_NAME}.timer" --no-pager || true
   echo
@@ -746,7 +846,7 @@ show_status() {
 }
 
 show_logs() {
-  require_root
+  require_root || return 1
   if [[ ! -f "$SCRIPT_LOG" ]]; then
     warn "No log file yet: $SCRIPT_LOG"
     return 0
@@ -755,41 +855,51 @@ show_logs() {
 }
 
 start_service() {
-  require_root
-  systemctl start "${APP_NAME}.service"
+  require_root || return 1
+  systemctl start "${APP_NAME}.service" >/dev/null 2>&1 || return 1
   success "Service executed once."
 }
 
 stop_timer() {
-  require_root
+  require_root || return 1
   systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
   success "Timer stopped and disabled."
 }
 
 restart_timer() {
-  require_root
-  systemctl restart "${APP_NAME}.timer"
+  require_root || return 1
+  systemctl restart "${APP_NAME}.timer" >/dev/null 2>&1 || return 1
   success "Timer restarted."
 }
 
 enable_timer() {
-  require_root
-  systemctl enable --now "${APP_NAME}.timer"
+  require_root || return 1
+  systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1 || return 1
   success "Timer enabled."
 }
 
 disable_timer() {
-  require_root
-  systemctl disable --now "${APP_NAME}.timer"
+  require_root || return 1
+  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
   success "Timer disabled."
 }
 
 uninstall_app() {
-  require_root
+  require_root || return 1
   if [[ -x "${INSTALL_DIR}/uninstall.sh" ]]; then
     exec "${INSTALL_DIR}/uninstall.sh"
   fi
-  die "uninstall.sh not found in ${INSTALL_DIR}"
+  die "uninstall.sh not found in ${INSTALL_DIR}" || return 1
+}
+
+menu_action() {
+  local label="$1"
+  shift
+  if "$@"; then
+    return 0
+  fi
+  err "${label} failed. ${LAST_ERROR:-Review the output above.}"
+  return 1
 }
 
 menu() {
@@ -813,17 +923,17 @@ MENU
     echo
     read -r -p "Choose an option: " choice
     case "$choice" in
-      1) interactive_install_or_reconfigure; pause ;;
-      2) show_current_config; pause ;;
-      3) validate_current_config; pause ;;
-      4) perform_failover_check; success "Check finished."; pause ;;
-      5) start_service; pause ;;
-      6) stop_timer; pause ;;
-      7) restart_timer; pause ;;
-      8) show_status; pause ;;
+      1) menu_action "Install / Reconfigure" interactive_install_or_reconfigure; pause ;;
+      2) menu_action "Show current config" show_current_config; pause ;;
+      3) menu_action "Validate current Xray config" validate_current_config; pause ;;
+      4) menu_action "Run health check" perform_failover_check && success "Check finished."; pause ;;
+      5) menu_action "Start service once" start_service; pause ;;
+      6) menu_action "Stop auto-run timer" stop_timer; pause ;;
+      7) menu_action "Restart auto-run timer" restart_timer; pause ;;
+      8) menu_action "Show status" show_status; pause ;;
       9) show_logs ;;
-      10) enable_timer; pause ;;
-      11) disable_timer; pause ;;
+      10) menu_action "Enable auto-run timer" enable_timer; pause ;;
+      11) menu_action "Disable auto-run timer" disable_timer; pause ;;
       12) uninstall_app ;;
       0) exit 0 ;;
       *) err "Invalid choice. Please enter a valid menu number."; sleep 1 ;;
@@ -870,7 +980,7 @@ main() {
     uninstall) uninstall_app ;;
     version|--version|-v) echo "$APP_VERSION" ;;
     help|--help|-h) usage ;;
-    *) usage; exit 1 ;;
+    *) usage; return 1 ;;
   esac
 }
 

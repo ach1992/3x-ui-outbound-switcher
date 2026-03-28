@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
 INSTALL_DIR="/opt/${APP_NAME}"
@@ -9,25 +9,25 @@ LOG_DIR="/var/log/${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${APP_NAME}.timer"
 SYMLINK_PATH="/usr/local/bin/${APP_NAME}"
-CONFIG_BACKUP_GLOB="/usr/local/x-ui/bin/config.json.bak.*"
 
-say() { printf "%b\n" "$*"; }
+say() { printf '%b\n' "$*"; }
 info() { say "[INFO] $*"; }
-success() { say "[OK] $*"; }
 warn() { say "[WARN] $*"; }
 err() { say "[ERROR] $*"; }
+
 die() { err "$*"; exit 1; }
 
 require_root() {
-  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Please run as root."
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Please run uninstall.sh as root."
 }
 
-prompt_yes_no() {
+ask_yes_no() {
   local prompt="$1"
   local default="${2:-N}"
-  local value
+  local value alt
+  if [[ "${default^^}" == "Y" ]]; then alt="N"; else alt="Y"; fi
   while true; do
-    read -r -p "$prompt [${default}/$( [[ "$default" == "Y" ]] && echo N || echo Y )]: " value
+    read -r -p "$prompt [$default/$alt]: " value
     value="${value:-$default}"
     case "${value^^}" in
       Y|YES) return 0 ;;
@@ -39,33 +39,30 @@ prompt_yes_no() {
 
 main() {
   require_root
+  say "============================================================"
+  say "  ${APP_NAME} uninstall"
+  say "============================================================"
 
-  warn "This will remove ${APP_NAME}, its service, timer, logs, state, and configuration files."
-  if ! prompt_yes_no "Do you want to continue" "N"; then
-    info "Uninstall cancelled."
+  if ! ask_yes_no "Remove ${APP_NAME} from this server?" "Y"; then
+    warn "Uninstall cancelled."
     exit 0
   fi
 
   systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
   systemctl stop "${APP_NAME}.service" >/dev/null 2>&1 || true
   rm -f "$SERVICE_FILE" "$TIMER_FILE"
-  systemctl daemon-reload
+  systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl reset-failed >/dev/null 2>&1 || true
 
   rm -f "$SYMLINK_PATH"
   rm -rf "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
   rm -f "/run/${APP_NAME}.lock"
 
-  if compgen -G "$CONFIG_BACKUP_GLOB" > /dev/null; then
-    if prompt_yes_no "Delete config backup files too (${CONFIG_BACKUP_GLOB})" "N"; then
-      rm -f $CONFIG_BACKUP_GLOB
-      success "Config backup files removed."
-    else
-      info "Config backup files kept."
-    fi
+  if ask_yes_no "Remove saved Xray config backups (*.bak.*) from /usr/local/x-ui/bin?" "N"; then
+    rm -f /usr/local/x-ui/bin/config.json.bak.*
   fi
 
-  success "${APP_NAME} has been removed."
+  say "[OK] ${APP_NAME} has been removed."
 }
 
 main "$@"
