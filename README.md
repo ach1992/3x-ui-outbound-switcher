@@ -1,322 +1,452 @@
 # 3X-UI Outbound Switcher
 
-Version: v1.0.19
+**Version:** v1.0.17
 
-Switch between 3x-ui outbounds by priority derived from outbound tags such as:
+Switch between outbound by your priority on 3X-UI.
 
-- `A-Main-Out`
+## What it does
+
+`3X-UI Outbound Switcher` runs on the same server where **3x-ui** is installed and automatically switches the active Xray outbound based on your outbound tag priority.
+
+Priority is derived from outbound tag names that start with uppercase letters:
+
+- `A-Primary-Out`
 - `B-Backup-Out`
-- `C-Node-3`
+- `C-Node-1`
+- `D-Node-2`
 
-The switcher runs on the **same server** as 3x-ui and uses the **3x-ui panel API** instead of editing the generated runtime config as the primary switch path.
+The switcher checks outbound health, keeps fail/success counters, and updates only the active routing rule when a switch is needed.
 
-## Supported platforms
+## Key features
 
-- Ubuntu 22 / 24 / 25
-- Debian 11 / 12 / 13
+- Priority from outbound tag names like `A-...`, `B-...`, `C-...`
+- Reads outbound tags directly from the live 3x-ui config
+- Uses 3x-ui API for login, config fetch, and Xray restart
+- Uses the same 3x-ui panel outbound test endpoint as the UI in **panel** probe mode
+- Falls back to `systemctl restart x-ui` if API restart fails
+- Supports online install and offline install
+- Interactive CLI menu after install
+- Systemd timer for automatic checks every 20 seconds
+- Config validation before every switch
+- Backup of `config.json` before every switch
+- Logs and state files for troubleshooting
 
-## How priority works
+## Supported systems
 
-Priority is derived from the outbound tag prefix:
+- Ubuntu 22
+- Ubuntu 24
+- Ubuntu 25
+- Debian 11
+- Debian 12
+- Debian 13
 
-- `A-...` = highest priority
-- `B-...` = next priority
-- `C-...` = next priority
-- and so on
+## Important notes
 
-Any outbound without this prefix is ignored by the automatic switch logic.
+- This project must be installed on the **same server** where 3x-ui is installed.
+- Only outbound tags matching `^[A-Z]-` are treated as prioritized outbounds.
+- The switcher does **not** rename your outbounds. You must name them yourself.
+- The switcher updates only the **last routing rule** that contains both `network` and `outboundTag`.
+- Default probe mode is **panel**.
+- `panel` probe mode uses the same request pattern as the 3x-ui outbound test button.
+- If `panel` probe has an internal API error, the switcher falls back to `tcp` for that specific check.
+- `http` probe mode is still available if you want to test through external URLs.
 
-## Main behavior
+## Priority naming example
 
-The switcher does all of the following:
+Use generic names like these:
 
-1. Logs in to the 3x-ui panel
-2. Downloads the current runtime config from the panel
-3. Reads the editable panel xray state from the UI API
-4. Detects prioritized outbounds from tags like `A-...`, `B-...`, `C-...`
-5. Tests outbounds by panel probe mode by default
-6. Chooses the best healthy outbound by priority
-7. Updates only the routing rule target outbound in editable `xraySetting`
-8. Saves the change through the panel update API
-9. Restarts Xray through the panel restart API
-10. Waits for the panel/API to become reachable again
-11. Verifies the selected outbound persisted
-12. Runs a post-switch health check
-13. Restores the previous xray setting if the final outcome is not healthy
+- `A-Primary-Out`
+- `B-Backup-Out`
+- `C-Node-1`
+- `D-Node-2`
+- `E-Node-3`
 
-## Important design choice
+Alphabetical order defines priority.
 
-This version does **not** use direct local `config.json` editing as the main switch path.
+## Probe modes
 
-It uses the same panel flow used by the UI:
+### 1) panel (default)
 
-- `POST /panel/xray/`
-- extract editable `xraySetting`
-- patch `routing.rules[last].outboundTag`
-- `POST /panel/xray/update`
-- restart Xray through panel API
+This is the recommended mode.
 
-This avoids the earlier issue where 3x-ui could rebuild its own runtime config after restart.
+It uses the same 3x-ui endpoint used by the **Test** button in the panel UI:
 
-## Files in this repository
+```text
+/panel/xray/testOutbound
+```
+
+This means health checks follow the panel's own outbound test logic and do not depend on an external probe URL.
+
+### 2) tcp
+
+This mode checks TCP reachability to the outbound's configured address and port.
+
+Use it when you want a simple fallback without any external URL dependency.
+
+### 3) http
+
+This mode creates a temporary local SOCKS probe and tests one or more external URLs through the outbound path.
+
+Use it only when you specifically want HTTP-level confirmation.
+
+## Online install
+
+After you push these files to your GitHub repository, users can install with:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ach1992/3x-ui-outbound-switcher/main/install.sh)
+```
+
+The installer will:
+
+1. install only required missing dependencies
+2. avoid `apt-get update` unless package install actually fails
+3. copy files into `/opt/3x-ui-outbound-switcher`
+4. create `/usr/local/bin/3x-ui-outbound-switcher`
+5. automatically launch the interactive setup menu
+
+## Offline install
+
+Offline install is supported for servers without internet access.
+
+### Prepare the files on another machine
+
+Download or clone the repository and place these files inside a folder named exactly:
+
+```text
+/root/3x-ui-outbound-switcher
+```
+
+Required files:
 
 - `install.sh`
 - `uninstall.sh`
 - `xui-switcher.sh`
 - `README.md`
 
-## Install
+### Move the folder to the target server
 
-Run on the same server where 3x-ui is installed:
+Copy that folder to the target server so it becomes:
 
-```bash
-sudo bash install.sh
+```text
+/root/3x-ui-outbound-switcher
 ```
 
-The installer copies files to:
-
-- `/opt/3x-ui-outbound-switcher`
-- `/etc/3x-ui-outbound-switcher`
-- `/var/lib/3x-ui-outbound-switcher`
-- `/var/log/3x-ui-outbound-switcher`
-
-And creates this command:
+### Run the installer
 
 ```bash
-3x-ui-outbound-switcher
+cd /root/3x-ui-outbound-switcher
+bash install.sh
 ```
 
-## Upgrade from an older version
+If the installer detects that offline files exist in `/root/3x-ui-outbound-switcher`, it asks whether to install **offline** or **online**.
 
-From inside the repo directory:
+If the offline folder does not exist, installer goes **online automatically** and does not ask.
 
-```bash
-cd ~/3x-ui-outbound-switcher
-sudo cp -f xui-switcher.sh /opt/3x-ui-outbound-switcher/xui-switcher.sh
-sudo cp -f install.sh /opt/3x-ui-outbound-switcher/install.sh
-sudo cp -f uninstall.sh /opt/3x-ui-outbound-switcher/uninstall.sh
-sudo chmod +x /opt/3x-ui-outbound-switcher/*.sh
-sudo cp -f xui-switcher.sh /usr/local/bin/3x-ui-outbound-switcher
-sudo chmod +x /usr/local/bin/3x-ui-outbound-switcher
-```
+## Interactive setup
 
-Then run the CLI and choose **Install / Reconfigure** once so the environment file is refreshed.
-
-## Uninstall
-
-```bash
-sudo bash uninstall.sh
-```
-
-This removes:
-
-- service and timer
-- install directory
-- env/state/log directories
-- symlink
-- known legacy paths from earlier broken naming attempts
-
-## First-time setup
-
-During **Install / Reconfigure**, the script asks for:
+After install, the script launches the setup wizard and asks for:
 
 - 3x-ui panel base URL
 - 3x-ui username
 - 3x-ui password
 - `config.json` path
-- xray binary path
+- Xray binary path
 - fail threshold
 - recover threshold
-- minimum seconds between switches
+- minimum switch gap
 - probe timeout
-- seconds to wait after restart
-- panel/API ready timeout after restart
-- auto-run timer interval
 - probe mode
+- probe URLs only when `http` mode is selected
 
-### Recommended values
+### Example panel URL
 
-A stable default set is usually:
+```text
+http://127.0.0.1:2053/your-base-path
+```
 
-- Fail threshold: `3`
-- Recover threshold: `3`
-- Minimum seconds between switches: `60`
-- Probe timeout: `8`
-- Seconds to wait after restart: `5`
-- Panel/API ready timeout after restart: `90`
-- Auto-run timer interval: `20`
-- Probe mode: `panel`
+or
 
-## Probe modes
+```text
+http://your-server-ip:2090/your-base-path
+```
 
-### panel
-Uses the same outbound test endpoint used by 3x-ui.
+## Menu
 
-This is the recommended mode.
+The installed command is:
 
-### tcp
-If panel probe is unavailable or you prefer a raw socket-level check, the script can fall back to TCP connection testing.
+```bash
+3x-ui-outbound-switcher
+```
 
-## CLI menu
-
-The script provides these actions:
+Menu options:
 
 1. Install / Reconfigure
 2. Show current config
 3. Validate current Xray config
 4. Start one check now
-5. Run self-test
-6. Start service once
-7. Stop auto-run timer
-8. Restart auto-run timer
-9. Show status
-10. Show logs
-11. Enable auto-run timer
-12. Disable auto-run timer
-13. Uninstall
+5. Start service once
+6. Stop auto-run timer
+7. Restart auto-run timer
+8. Show status
+9. Show logs
+10. Enable auto-run timer
+11. Disable auto-run timer
+12. Uninstall
 0. Exit
 
-## Logging
-
-Main log file:
+## CLI commands
 
 ```bash
-/var/log/3x-ui-outbound-switcher/switcher.log
+3x-ui-outbound-switcher
+3x-ui-outbound-switcher install
+3x-ui-outbound-switcher show-config
+3x-ui-outbound-switcher validate
+3x-ui-outbound-switcher run-now
+3x-ui-outbound-switcher start
+3x-ui-outbound-switcher stop
+3x-ui-outbound-switcher restart
+3x-ui-outbound-switcher status
+3x-ui-outbound-switcher logs
+3x-ui-outbound-switcher enable
+3x-ui-outbound-switcher disable
+3x-ui-outbound-switcher uninstall
+3x-ui-outbound-switcher version
 ```
 
-Action log file:
+## Files and locations
+
+- App directory: `/opt/3x-ui-outbound-switcher`
+- Env file: `/etc/3x-ui-outbound-switcher/switcher.env`
+- State file: `/var/lib/3x-ui-outbound-switcher/state.json`
+- Main log: `/var/log/3x-ui-outbound-switcher/switcher.log`
+- Action log: `/var/log/3x-ui-outbound-switcher/actions.log`
+- CLI symlink: `/usr/local/bin/3x-ui-outbound-switcher`
+
+## Logs
+
+Show live logs:
+
+```bash
+3x-ui-outbound-switcher logs
+```
+
+Or directly:
+
+```bash
+tail -f /var/log/3x-ui-outbound-switcher/switcher.log
+```
+
+Switch actions are stored in:
 
 ```bash
 /var/log/3x-ui-outbound-switcher/actions.log
 ```
 
-If the log file does not exist yet, the CLI can fall back to `journalctl`.
+## Service behavior
 
-## Service and timer
+- A systemd timer runs every 20 seconds.
+- A switch happens only if the active outbound fails enough times.
+- Recovery back to a higher-priority outbound requires enough consecutive successes.
+- A minimum switch gap prevents rapid flapping.
 
-Service:
+## Default values
 
-```bash
-3x-ui-outbound-switcher.service
-```
+- Fail threshold: `3`
+- Recover threshold: `2`
+- Minimum switch gap: `60`
+- Probe timeout: `8`
+- Probe mode: `panel`
 
-Timer:
+Default HTTP probe URLs, used only in `http` mode:
 
-```bash
-3x-ui-outbound-switcher.timer
-```
+- `https://cp.cloudflare.com/generate_204`
+- `http://connectivitycheck.gstatic.com/generate_204`
+- `https://www.msftconnecttest.com/connecttest.txt`
 
-The timer uses `OnUnitInactiveSec`, which helps avoid overlap better than fixed calendar scheduling for this use case.
+## v1.0.17 fixes and improvements
 
-## Health and switch logic
+- Fixed the `jq: --arg takes two parameters` bug in state handling
+- Switched the default health-check mode to **panel**
+- Added support for the same 3x-ui outbound test endpoint used by the UI
+- Added automatic fallback from `panel` probe to `tcp` when panel probing errors internally
+- Improved config extraction from `getConfigJson` responses that are wrapped instead of raw
+- Kept `tcp` and `http` modes available as fallbacks
 
-The switcher keeps per-outbound success/fail counters.
+## Uninstall
 
-### It switches away when:
-- the current outbound reaches the configured fail threshold
-- and a higher-priority healthy candidate is available
-
-### It switches back upward when:
-- a higher-priority outbound becomes healthy again
-- and it reaches the configured recover threshold
-- and the minimum switch gap has passed
-
-## Self-test
-
-Self-test checks:
-
-- panel login
-- runtime config fetch
-- editable `xraySetting` fetch from panel UI API
-- prioritized outbound discovery
-- current routing outbound detection
-- outbound health by priority
-- timer/service status
-
-If the timer is active, self-test still runs with the switcher lock so it does not overlap with a background check.
-
-## What counts as a successful switch
-
-A switch is considered successful only if the final outcome is healthy:
-
-- panel login works again
-- panel config can be fetched again
-- selected outbound persisted in panel config
-- post-switch probe on the selected outbound succeeds
-
-The script does **not** treat `getXrayResult` as the only source of truth, because some panels may report non-fatal messages such as metrics-port conflicts while the final working state is actually acceptable.
-
-## Known note about `getXrayResult`
-
-On some installations, `GET /panel/xray/getXrayResult` may report messages like:
-
-```text
-Failed to start: listen tcp 127.0.0.1:11111: bind: address already in use
-```
-
-This may appear even when the final routing change is practically applied and the panel is reachable again.
-
-For that reason, this project uses **final outcome verification** instead of treating that endpoint as a hard-fail decision by itself.
-
-## Troubleshooting
-
-### No prioritized outbound tags found
-Make sure your outbound tags start with capital-letter prefixes such as:
-
-- `A-...`
-- `B-...`
-- `C-...`
-
-### Panel login failed
-Check:
-
-- base URL
-- username
-- password
-- local firewall / reverse proxy behavior
-
-### No healthy prioritized outbound found
-Possible reasons:
-
-- all panel outbound probes are failing
-- the timer/service is overlapping with manual testing on a busy panel
-- the panel itself is temporarily unstable during restart/reload
-
-Try again with the timer disabled and run self-test manually.
-
-### Switch did not persist
-This usually means the panel rejected the change or the restart sequence did not settle into a healthy final state.
-
-Check:
+From the menu:
 
 ```bash
-sudo tail -n 200 /var/log/3x-ui-outbound-switcher/switcher.log
-sudo tail -n 200 /var/log/3x-ui-outbound-switcher/actions.log
+3x-ui-outbound-switcher
 ```
 
-## Offline installation
+Choose `Uninstall`.
 
-If you copy these four files to a server manually:
-
-- `install.sh`
-- `uninstall.sh`
-- `xui-switcher.sh`
-- `README.md`
-
-you can install without Git by simply running:
+Or directly:
 
 ```bash
-sudo bash install.sh
-```
-
-## Repository
-
-GitHub repository:
-
-```text
-https://github.com/ach1992/3x-ui-outbound-switcher
+3x-ui-outbound-switcher uninstall
 ```
 
 ## License
 
 MIT
+
+
+## What changed in v1.0.17
+
+- Uses consistent lowercase/hyphenated paths only
+- Cleans up legacy paths from older broken builds automatically during install and uninstall
+- Validates and patches the real local `config.json` during outbound switching
+- Timer uses `OnUnitInactiveSec` to avoid overlap between runs
+
+
+## Important behavior after install
+
+If you enable the auto-run timer during installation, the timer may immediately start the first check.
+To avoid overlap, the installer now skips the manual `Run one health check now` step whenever the timer/service is already running.
+
+If you want to run a manual check right away, choose `N` for auto-run during install, finish setup, then run the CLI manually.
+
+
+
+## Self-test
+
+Version v1.0.17 adds a built-in self-test. It can be run:
+- automatically at the end of install/reconfigure
+- manually from the CLI menu via `Run self-test`
+
+The self-test checks:
+- 3x-ui panel login
+- config fetch from panel API
+- local `config.json` validation
+- prioritized outbound discovery from tags like `A-...`, `B-...`
+- one live probe against the first prioritized outbound
+- current timer/service status
+
+
+## Installer overlap protection
+
+Version v1.0.17 fixes the installer flow so that if you enable the auto-run timer and it starts immediately, the installer skips the manual `Run one health check now` step to avoid a lock conflict.
+
+The CLI menu also checks for an active background run before starting a manual check.
+
+
+
+## Final overlap guard
+
+Version v1.0.17 applies the overlap protection in both places:
+- during install/reconfigure
+- in the interactive CLI menu
+
+A manual check is now blocked with a clear warning whenever the timer/service or lock file indicates that another run is already in progress.
+
+
+
+## Local config switch validation fix
+
+Version v1.0.17 fixes the outbound switch step to patch and validate the real local `config.json` on disk instead of the API-fetched config copy.
+
+This resolves cases where health checks succeed, but switching fails with:
+- `Modified config failed validation.`
+
+The self-test now also includes a dry-run validation of the local switch patch.
+
+
+
+## Switch-valid candidate filtering
+
+Version v1.0.17 adds a second safety gate for outbound selection:
+
+An outbound is now eligible for switching only if:
+1. its probe succeeds
+2. a dry-run patch of the real local `config.json` with that outbound also passes `xray run -test`
+
+This prevents repeated loops where probing succeeds but switching keeps failing with:
+- `Modified config failed validation.`
+
+Validation stderr is now also written to the switcher log for easier debugging.
+
+
+
+## Panel-truth switching mode
+
+Version v1.0.17 changes the switch decision model:
+
+- panel outbound test is the primary source of truth
+- `xray run -test` is now diagnostic only and no longer blocks a switch
+- after each switch, the script:
+  1. restarts Xray/panel
+  2. waits for the panel to become ready
+  3. logs in again
+  4. runs a post-switch health check on the selected outbound
+  5. restores the backup automatically if the service does not come back healthy
+
+This better matches real 3x-ui behavior where panel testing and manual switching may succeed even when strict `xray run -test` validation does not.
+
+
+
+## Restart readiness fix
+
+Version v1.0.17 improves post-switch readiness detection:
+
+- readiness is no longer based on a simple HTTP status check against `/login`
+- the script now waits until both of these succeed again after restart:
+  1. panel login
+  2. `getConfigJson` from the panel API
+
+This better matches real 3x-ui recovery behavior after restart and avoids premature rollback when the panel or API needs more time to come back.
+Default values were also updated to:
+- `Seconds to wait after restart`: `5`
+- `Panel/API ready timeout after restart`: `90`
+
+
+
+## Panel update API switching
+
+Version v1.0.17 removes direct switching through local `config.json` edits.
+
+The switch flow now uses the same panel endpoint used by the 3x-ui UI when you press **Save**:
+
+- `POST /panel/xray/update` with form field `xraySetting=<full json>`
+
+Then it:
+1. restarts Xray through the panel/API flow
+2. waits for panel login + `getConfigJson` readiness
+3. fetches the panel config again
+4. verifies the requested outbound actually persisted in panel state
+5. runs a post-switch health check
+6. restores the previous panel config automatically if any of those checks fail
+
+This is safer and more correct than editing `/usr/local/x-ui/bin/config.json` directly, because 3x-ui rebuilds and manages its own Xray config state.
+
+
+## v1.0.17 fixes
+
+- fixes `RESTART_WAIT_SECONDS: unbound variable` during install/reconfigure
+- saves restart timing defaults into the environment file even on first install
+- creates/touches log files during save so the log viewer works immediately
+- tries both known 3x-ui restart endpoints:
+  - `/panel/api/server/restartXrayService`
+  - `/panel/server/restartXrayService`
+- improves self-test to evaluate all prioritized outbounds and report the highest-priority healthy one instead of failing only because the first outbound is unhealthy
+- if no switcher log exists yet, the log view falls back to `journalctl`
+
+
+## v1.0.17 final switch path
+
+This version switches outbounds using the exact 3x-ui UI flow:
+
+1. `POST /panel/xray/` to fetch the editable panel state
+2. parse `obj` as JSON and extract `xraySetting`
+3. patch only the target routing rule in `xraySetting`
+4. `POST /panel/xray/update` with `xraySetting=<full editable json>`
+5. `POST /panel/api/server/restartXrayService` (or `/panel/server/restartXrayService` if needed)
+6. poll `GET /panel/xray/getXrayResult`
+7. wait for panel login + `getConfigJson`
+8. verify the selected outbound actually persisted
+9. run a post-switch health check
+
+Direct switching through local `config.json` is no longer used in the main flow.
+`xray run -test` is no longer used in the switch decision path.

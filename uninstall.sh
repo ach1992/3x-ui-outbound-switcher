@@ -1,28 +1,87 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
-LEGACY_NAMES=("3X-UI Outbound Switcher")
+APP_TITLE="3X-UI Outbound Switcher"
+APP_VERSION="v1.0.17"
+LEGACY_NAMES=("3X-UI Outbound Switcher" "3x-ui outbound switcher")
+INSTALL_DIR="/opt/${APP_NAME}"
+ENV_DIR="/etc/${APP_NAME}"
+STATE_DIR="/var/lib/${APP_NAME}"
+LOG_DIR="/var/log/${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${APP_NAME}.timer"
+SYMLINK_PATH="/usr/local/bin/${APP_NAME}"
 
-[[ "$(id -u)" -eq 0 ]] || { echo "[ERROR] Run as root."; exit 1; }
+say() { printf '%b\n' "$*"; }
+info() { say "[INFO] $*"; }
+warn() { say "[WARN] $*"; }
+err() { say "[ERROR] $*"; }
 
-systemctl disable --now "${APP_NAME}.timer" 2>/dev/null || true
-systemctl stop "${APP_NAME}.service" 2>/dev/null || true
-rm -f "$SERVICE_FILE" "$TIMER_FILE"
-systemctl daemon-reload >/dev/null 2>&1 || true
-systemctl reset-failed >/dev/null 2>&1 || true
+die() { err "$*"; exit 1; }
 
-rm -f "/usr/local/bin/${APP_NAME}" "/run/${APP_NAME}.lock"
-rm -rf "/opt/${APP_NAME}" "/etc/${APP_NAME}" "/var/lib/${APP_NAME}" "/var/log/${APP_NAME}" "/tmp/${APP_NAME}" "/tmp/${APP_NAME}_"*
+require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Please run uninstall.sh as root."
+}
 
-for legacy in "${LEGACY_NAMES[@]}"; do
-  systemctl disable --now "${legacy}.timer" >/dev/null 2>&1 || true
-  systemctl stop "${legacy}.service" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${legacy}.service" "/etc/systemd/system/${legacy}.timer"
-  rm -f "/usr/local/bin/${legacy}" "/run/${legacy}.lock"
-  rm -rf "/opt/${legacy}" "/etc/${legacy}" "/var/lib/${legacy}" "/var/log/${legacy}" "/tmp/${legacy}" "/tmp/${legacy}_"*
-done
+ask_yes_no() {
+  local prompt="$1"
+  local default="${2:-N}"
+  local value alt
+  if [[ "${default^^}" == "Y" ]]; then alt="N"; else alt="Y"; fi
+  while true; do
+    read -r -p "$prompt [$default/$alt]: " value
+    value="${value:-$default}"
+    case "${value^^}" in
+      Y|YES) return 0 ;;
+      N|NO) return 1 ;;
+      *) err "Please answer yes or no." ;;
+    esac
+  done
+}
 
-echo "[OK] 3X-UI Outbound Switcher removed."
+cleanup_current() {
+  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
+  systemctl stop "${APP_NAME}.service" >/dev/null 2>&1 || true
+  rm -f "$SERVICE_FILE" "$TIMER_FILE"
+  rm -f "$SYMLINK_PATH"
+  rm -rf "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
+  rm -f "/run/${APP_NAME}.lock" "/tmp/${APP_NAME}_login_resp.json" "/tmp/${APP_NAME}_restart_resp.json"
+  rm -rf "/tmp/${APP_NAME}"
+}
+
+cleanup_legacy() {
+  local legacy
+  for legacy in "${LEGACY_NAMES[@]}"; do
+    systemctl disable --now "${legacy}.timer" >/dev/null 2>&1 || true
+    systemctl stop "${legacy}.service" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${legacy}.service" "/etc/systemd/system/${legacy}.timer"
+    rm -f "/usr/local/bin/${legacy}" "/run/${legacy}.lock" "/tmp/${legacy}_login_resp.json" "/tmp/${legacy}_restart_resp.json"
+    rm -rf "/opt/${legacy}" "/etc/${legacy}" "/var/lib/${legacy}" "/var/log/${legacy}" "/tmp/${legacy}"
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed >/dev/null 2>&1 || true
+}
+
+main() {
+  require_root
+  say "============================================================"
+  say "  ${APP_NAME} uninstall ${APP_VERSION}"
+  say "============================================================"
+
+  if ! ask_yes_no "Remove ${APP_NAME} from this server?" "Y"; then
+    warn "Uninstall cancelled."
+    exit 0
+  fi
+
+  cleanup_current
+  cleanup_legacy
+
+  if ask_yes_no "Remove saved Xray config backups (*.bak.*) from /usr/local/x-ui/bin?" "N"; then
+    rm -f /usr/local/x-ui/bin/config.json.bak.*
+  fi
+
+  say "[OK] ${APP_NAME} and legacy artifacts have been removed."
+}
+
+main "$@"
