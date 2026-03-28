@@ -2,7 +2,7 @@
 set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
-APP_VERSION="v1.0.1"
+APP_VERSION="v1.0.2"
 INSTALL_DIR="/opt/${APP_NAME}"
 ENV_DIR="/etc/${APP_NAME}"
 ENV_FILE="${ENV_DIR}/switcher.env"
@@ -107,12 +107,14 @@ load_env() {
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     PANEL_URL="$(normalize_url "${PANEL_URL:-}")"
-    if [[ -n "${PROBE_URLS:-}" ]]; then
-      PROBE_URLS="$(printf '%s' "$PROBE_URLS" | tr -d ' ' )"
-    elif [[ -n "${PROBE_URL:-}" ]]; then
-      PROBE_URLS="${PROBE_URL}"
+    PROBE_MODE="${PROBE_MODE:-tcp}"
+    if [[ -n "${PROBE_TARGETS:-}" ]]; then
+      PROBE_TARGETS="$(printf '%s' "$PROBE_TARGETS" | tr -d ' ')"
+    elif [[ -n "${PROBE_URLS:-}" ]]; then
+      PROBE_MODE="http"
+      PROBE_TARGETS="$(printf '%s' "$PROBE_URLS" | tr -d ' ')"
     else
-      PROBE_URLS="https://cp.cloudflare.com/generate_204,http://connectivitycheck.gstatic.com/generate_204,https://www.msftconnecttest.com/connecttest.txt"
+      PROBE_TARGETS=""
     fi
   fi
 }
@@ -129,7 +131,8 @@ FAIL_THRESHOLD="${FAIL_THRESHOLD}"
 RECOVER_THRESHOLD="${RECOVER_THRESHOLD}"
 MIN_SWITCH_GAP="${MIN_SWITCH_GAP}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT}"
-PROBE_URLS="${PROBE_URLS}"
+PROBE_MODE="${PROBE_MODE}"
+PROBE_TARGETS="${PROBE_TARGETS}"
 ENVEOF
   chmod 600 "$ENV_FILE"
 }
@@ -152,94 +155,9 @@ header() {
   say "Repository : https://github.com/ach1992/3x-ui-outbound-switcher"
   say "Purpose    : Switch between outbound by your priority on 3X-UI"
   say "Priority   : Derived from outbound tags like A-..., B-..., C-..."
+  say "Probe      : Default TCP check to each outbound server address:port"
   say "Platform   : Ubuntu 22/24/25, Debian 11/12/13"
   say "${COL_BLUE}============================================================${COL_RESET}"
-}
-
-pkg_install_if_missing() {
-  local pkg="$1"
-  local bin="$2"
-  if command_exists "$bin"; then
-    return 0
-  fi
-
-  info "Installing missing dependency: ${pkg}"
-  if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if (( DEPS_UPDATED == 0 )); then
-    warn "Initial package install failed. Running apt-get update once and retrying."
-    if ! apt-get update >/dev/null 2>&1; then
-      return 1
-    fi
-    DEPS_UPDATED=1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1 || return 1
-    return 0
-  fi
-
-  return 1
-}
-
-ensure_dependencies() {
-  require_root || return 1
-  command_exists apt-get || die "This installer supports Debian and Ubuntu only." || return 1
-  pkg_install_if_missing curl curl || die "Failed to install curl." || return 1
-  pkg_install_if_missing jq jq || die "Failed to install jq." || return 1
-  command_exists flock || pkg_install_if_missing util-linux flock || die "Failed to install util-linux / flock." || return 1
-  command_exists timeout || die "The 'timeout' command is required but was not found." || return 1
-  command_exists systemctl || die "systemctl is required but was not found." || return 1
-}
-
-validate_url() {
-  [[ "$1" =~ ^https?://.+ ]]
-}
-
-validate_probe_urls() {
-  local urls="$1"
-  local url
-  [[ -n "$urls" ]] || return 1
-  IFS=',' read -r -a _probe_urls <<< "$urls"
-  for url in "${_probe_urls[@]}"; do
-    url="$(printf '%s' "$url" | trim_spaces)"
-    [[ -n "$url" ]] || continue
-    validate_url "$url" || return 1
-  done
-  return 0
-}
-
-prompt_nonempty() {
-  local prompt="$1"
-  local default="${2:-}"
-  local value
-  while true; do
-    if [[ -n "$default" ]]; then
-      read -r -p "$prompt [$default]: " value
-      value="${value:-$default}"
-    else
-      read -r -p "$prompt: " value
-    fi
-    if [[ -n "$value" ]]; then
-      printf '%s' "$value"
-      return 0
-    fi
-    err "Value cannot be empty."
-  done
-}
-
-prompt_number() {
-  local prompt="$1"
-  local default="$2"
-  local value
-  while true; do
-    read -r -p "$prompt [$default]: " value
-    value="${value:-$default}"
-    if [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )); then
-      printf '%s' "$value"
-      return 0
-    fi
-    err "Please enter a valid positive number."
-  done
 }
 
 prompt_yes_no() {
@@ -255,6 +173,87 @@ prompt_yes_no() {
       N|NO) return 1 ;;
       *) err "Please answer yes or no." ;;
     esac
+  done
+}
+
+prompt_nonempty() {
+  local label="$1"
+  local default="${2:-}"
+  local value
+  while true; do
+    if [[ -n "$default" ]]; then
+      read -r -p "$label [$default]: " value
+      value="${value:-$default}"
+    else
+      read -r -p "$label: " value
+    fi
+    value="$(printf '%s' "$value" | trim_spaces)"
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+    err "This field cannot be empty."
+  done
+}
+
+prompt_number() {
+  local label="$1"
+  local default="$2"
+  local value
+  while true; do
+    read -r -p "$label [$default]: " value
+    value="${value:-$default}"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+    err "Please enter a valid number."
+  done
+}
+
+validate_url() {
+  [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
+}
+
+validate_probe_targets() {
+  local s="$1"
+  [[ -n "$s" ]] || return 1
+  IFS=',' read -r -a _targets <<< "$s"
+  local t
+  for t in "${_targets[@]}"; do
+    [[ "$t" =~ ^https?://[^[:space:]]+$ ]] || return 1
+  done
+  return 0
+}
+
+ensure_package_installed() {
+  local pkg="$1"
+  dpkg -s "$pkg" >/dev/null 2>&1 && return 0
+  info "Installing dependency: $pkg"
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
+    return 0
+  fi
+  if (( DEPS_UPDATED == 0 )); then
+    info "Refreshing package index once..."
+    apt-get update >/dev/null 2>&1 || return 1
+    DEPS_UPDATED=1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  return 1
+}
+
+ensure_dependencies() {
+  command_exists apt-get || die "This script supports Debian and Ubuntu only." || return 1
+  local dep
+  for dep in jq curl flock systemctl; do
+    if ! command_exists "$dep"; then
+      case "$dep" in
+        flock) ensure_package_installed util-linux || die "Could not install util-linux." || return 1 ;;
+        systemctl) die "systemd is required on this system." || return 1 ;;
+        *) ensure_package_installed "$dep" || die "Could not install $dep." || return 1 ;;
+      esac
+    fi
   done
 }
 
@@ -291,16 +290,44 @@ panel_login() {
   return 0
 }
 
+extract_config_from_api_response() {
+  local raw="$1"
+  local out="$2"
+
+  jq -e 'type=="object" and has("outbounds") and has("routing")' "$raw" >/dev/null 2>&1 && {
+    cp -f "$raw" "$out"
+    return 0
+  }
+
+  jq -e 'type=="string"' "$raw" >/dev/null 2>&1 && {
+    jq -r 'fromjson' "$raw" > "$out" 2>/dev/null && return 0
+  }
+
+  jq -e 'type=="object" and (.obj != null or .data != null or .config != null or .result != null)' "$raw" >/dev/null 2>&1 || return 1
+
+  jq '(.obj // .data // .config // .result)
+      | if type=="string" then fromjson else . end' "$raw" > "$out" 2>/dev/null || return 1
+
+  jq -e 'type=="object" and has("outbounds") and has("routing")' "$out" >/dev/null 2>&1 || return 1
+  return 0
+}
+
 panel_get_config() {
   local out="$1"
+  local raw
+  raw="$(mktemp)"
   local code
   code="$({
-    curl -sS -o "$out" -w "%{http_code}" \
+    curl -sS -o "$raw" -w "%{http_code}" \
       -b "$COOKIE_JAR" \
       "${PANEL_URL}/panel/api/server/getConfigJson"
   } || true)"
-  [[ "$code" == "200" ]] || return 1
-  jq empty "$out" >/dev/null 2>&1 || return 1
+  if [[ "$code" != "200" ]]; then
+    rm -f "$raw"
+    return 1
+  fi
+  extract_config_from_api_response "$raw" "$out" || { rm -f "$raw"; return 1; }
+  rm -f "$raw"
   return 0
 }
 
@@ -326,6 +353,7 @@ read_priority_tags_from_config() {
   local cfg="$1"
   mapfile -t PRIORITY_TAGS < <(
     jq -r '.outbounds[]?.tag // empty' "$cfg" \
+      | tr -d '\r' \
       | grep -E '^[A-Z]-' \
       | sort
   )
@@ -401,12 +429,27 @@ validate_config() {
 backup_config() {
   local dst="${CONFIG_PATH}.bak.$(date +%F_%H-%M-%S)"
   cp -a "$CONFIG_PATH" "$dst"
-  printf '%s' "$dst"
+  echo "$dst"
 }
 
 load_outbound_json() {
   local cfg="$1" tag="$2"
   jq -c --arg tag "$tag" '.outbounds[] | select(.tag == $tag)' "$cfg"
+}
+
+extract_outbound_endpoint() {
+  local cfg="$1" tag="$2"
+  jq -r --arg tag "$tag" '
+    .outbounds[] | select(.tag == $tag) |
+    (
+      if (.settings.vnext // []) | length > 0 then
+        {address: .settings.vnext[0].address, port: .settings.vnext[0].port}
+      elif (.settings.servers // []) | length > 0 then
+        {address: .settings.servers[0].address, port: .settings.servers[0].port}
+      elif (.settings.address? != null and .settings.port? != null) then
+        {address: .settings.address, port: .settings.port}
+      else empty end
+    ) | @tsv "\(.address)\t\(.port)"' "$cfg"
 }
 
 build_probe_config() {
@@ -420,40 +463,36 @@ build_probe_config() {
     --arg tag "$tag" \
     --argjson port "$port" '
     {
-      log: {access: "none", dnsLog: false, loglevel: "warning"},
+      log: {
+        access: "none",
+        dnsLog: false,
+        loglevel: "warning"
+      },
       inbounds: [
         {
           tag: "probe-socks",
           listen: "127.0.0.1",
           port: $port,
           protocol: "socks",
-          settings: {auth: "noauth", udp: false}
+          settings: {
+            auth: "noauth",
+            udp: false
+          }
         }
       ],
-      outbounds: [$outbound],
+      outbounds: [ $outbound ],
       routing: {
         domainStrategy: "AsIs",
         rules: [
-          {type: "field", inboundTag: ["probe-socks"], outboundTag: $tag}
+          { type: "field", inboundTag: ["probe-socks"], outboundTag: $tag }
         ]
       }
-    }
-  ' > "${probe_dir}/config.json"
+    }' > "${probe_dir}/config.json"
 }
 
-probe_url_through_proxy() {
-  local port="$1" url="$2"
-  timeout "$PROBE_TIMEOUT" curl -sS -o /dev/null \
-    --proxy "socks5h://127.0.0.1:${port}" \
-    --max-time "$PROBE_TIMEOUT" \
-    -L -f "$url"
-}
-
-probe_tag() {
+probe_http_targets() {
   local cfg="$1" tag="$2"
-  local probe_dir port xpid rc url
-  local -a urls
-
+  local probe_dir port xpid rc=1 target
   probe_dir="$(mktemp -d "${TMP_BASE}/probe-XXXXXX")"
   port=$((RANDOM % 10000 + 20000))
 
@@ -464,21 +503,44 @@ probe_tag() {
   xpid=$!
   sleep 1
 
-  rc=1
-  IFS=',' read -r -a urls <<< "$PROBE_URLS"
-  for url in "${urls[@]}"; do
-    url="$(printf '%s' "$url" | trim_spaces)"
-    [[ -n "$url" ]] || continue
-    if probe_url_through_proxy "$port" "$url"; then
-      rc=0
-      break
-    fi
+  IFS=',' read -r -a targets <<< "$PROBE_TARGETS"
+  for target in "${targets[@]}"; do
+    [[ -n "$target" ]] || continue
+    set +e
+    timeout "$PROBE_TIMEOUT" curl -sS -o /dev/null \
+      --proxy "socks5h://127.0.0.1:${port}" \
+      --max-time "$PROBE_TIMEOUT" \
+      -f \
+      "$target"
+    rc=$?
+    set -e
+    [[ $rc -eq 0 ]] && break
   done
 
   kill "$xpid" >/dev/null 2>&1 || true
   wait "$xpid" >/dev/null 2>&1 || true
   rm -rf "$probe_dir"
   [[ $rc -eq 0 ]]
+}
+
+probe_tcp_endpoint() {
+  local cfg="$1" tag="$2"
+  local endpoint host port
+  endpoint="$(extract_outbound_endpoint "$cfg" "$tag" || true)"
+  [[ -n "$endpoint" ]] || { log "WARN: no endpoint found for tag=$tag"; return 1; }
+  host="${endpoint%%$'\t'*}"
+  port="${endpoint##*$'\t'}"
+  [[ -n "$host" && -n "$port" ]] || return 1
+  timeout "$PROBE_TIMEOUT" bash -lc "exec 3<>/dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+probe_tag() {
+  local cfg="$1" tag="$2"
+  case "${PROBE_MODE:-tcp}" in
+    tcp) probe_tcp_endpoint "$cfg" "$tag" ;;
+    http) probe_http_targets "$cfg" "$tag" ;;
+    *) log "WARN: unknown PROBE_MODE=${PROBE_MODE}, falling back to tcp"; probe_tcp_endpoint "$cfg" "$tag" ;;
+  esac
 }
 
 inc_fail() {
@@ -496,16 +558,25 @@ reset_counts() {
   state_set --arg t "$tag" '.success_counts[$t] = 0 | .fail_counts[$t] = 0'
 }
 
-get_fail_count() { state_get --arg t "$1" '.fail_counts[$t] // 0'; }
-get_success_count() { state_get --arg t "$1" '.success_counts[$t] // 0'; }
-get_current_state_tag() { state_get '.current'; }
-get_last_switch_ts() { state_get '.last_switch_ts'; }
+get_fail_count() {
+  local tag="$1"
+  state_get --arg t "$tag" '.fail_counts[$t] // 0'
+}
+
+get_success_count() {
+  local tag="$1"
+  state_get --arg t "$tag" '.success_counts[$t] // 0'
+}
 
 set_current() {
-  local tag="$1" now
+  local tag="$1"
+  local now
   now="$(date +%s)"
   state_set --arg t "$tag" --argjson now "$now" '.current = $t | .last_switch_ts = $now'
 }
+
+get_current_state_tag() { state_get '.current'; }
+get_last_switch_ts() { state_get '.last_switch_ts'; }
 
 choose_best_available() {
   local tag s
@@ -520,22 +591,15 @@ choose_best_available() {
 }
 
 apply_switch() {
-  local api_cfg="$1" new_tag="$2"
-  local idx tmp_cfg backup
+  local api_cfg="$1" new_tag="$2" idx tmp_cfg backup
 
   idx="$(find_target_rule_index "$api_cfg")"
-  [[ "$idx" != "-1" ]] || die "Target routing rule not found." || return 1
+  [[ "$idx" != "-1" ]] || { die "Target routing rule not found." || return 1; }
 
   tmp_cfg="$(mktemp)"
-  jq --argjson idx "$idx" --arg tag "$new_tag" '.routing.rules[$idx].outboundTag = $tag' "$api_cfg" > "$tmp_cfg" || {
-    rm -f "$tmp_cfg"
-    die "Failed to build modified config." || return 1
-  }
+  jq --argjson idx "$idx" --arg tag "$new_tag" '.routing.rules[$idx].outboundTag = $tag' "$api_cfg" > "$tmp_cfg"
 
-  if ! validate_config "$tmp_cfg"; then
-    rm -f "$tmp_cfg"
-    die "Modified config failed validation." || return 1
-  fi
+  validate_config "$tmp_cfg" || { rm -f "$tmp_cfg"; die "Modified config did not pass Xray validation." || return 1; }
 
   backup="$(backup_config)"
   cp -f "$tmp_cfg" "$CONFIG_PATH"
@@ -550,18 +614,17 @@ apply_switch() {
   log "ERROR: restart failed, restoring backup"
   cp -f "$backup" "$CONFIG_PATH"
   restart_xray_with_fallback || true
-  die "Switch failed and backup was restored." || return 1
+  return 1
 }
 
 perform_failover_check() {
   require_root || return 1
+  ensure_dependencies || return 1
   ensure_lock || return 1
   load_env
-
-  [[ -f "$ENV_FILE" ]] || die "Configuration not found. Run Install / Reconfigure first." || return 1
   validate_local_paths || return 1
 
-  panel_login || die "3x-ui login failed. Check PANEL_URL, username, or password." || return 1
+  panel_login || { die "Panel login failed." || return 1; }
 
   local api_cfg
   api_cfg="$(mktemp)"
@@ -573,14 +636,17 @@ perform_failover_check() {
 
   local current_cfg_tag current_state_tag
   current_cfg_tag="$(get_current_active_tag_from_config "$api_cfg")"
-  [[ -n "$current_cfg_tag" && "$current_cfg_tag" != "null" ]] || { rm -f "$api_cfg"; die "Could not detect current active outboundTag from routing rules." || return 1; }
-
   current_state_tag="$(get_current_state_tag)"
+
+  [[ -n "$current_cfg_tag" && "$current_cfg_tag" != "null" ]] || { rm -f "$api_cfg"; die "Could not detect current outboundTag from config." || return 1; }
+
   if [[ "$current_state_tag" == "null" || -z "$current_state_tag" ]]; then
     set_current "$current_cfg_tag"
+    current_state_tag="$current_cfg_tag"
     log "state initialized from config: $current_cfg_tag"
   elif [[ "$current_state_tag" != "$current_cfg_tag" ]]; then
     state_set --arg t "$current_cfg_tag" '.current = $t'
+    current_state_tag="$current_cfg_tag"
     log "state synchronized from config: $current_cfg_tag"
   fi
 
@@ -594,6 +660,8 @@ perform_failover_check() {
         inc_fail "$tag"
         log "probe fail: $tag (fail=$(get_fail_count "$tag"))"
       fi
+    else
+      log "WARN: tag not found in current config, skipped: $tag"
     fi
   done
 
@@ -601,7 +669,9 @@ perform_failover_check() {
   now="$(date +%s)"
   last_switch="$(get_last_switch_ts)"
   can_switch=0
-  (( now - last_switch >= MIN_SWITCH_GAP )) && can_switch=1
+  if (( now - last_switch >= MIN_SWITCH_GAP )); then
+    can_switch=1
+  fi
 
   current_fail="$(get_fail_count "$current_cfg_tag")"
   desired_tag="$current_cfg_tag"
@@ -672,7 +742,10 @@ TIMER
 validate_install_inputs() {
   validate_url "$PANEL_URL" || die "Invalid PANEL_URL. Example: http://127.0.0.1:2053/ach" || return 1
   validate_local_paths || return 1
-  validate_probe_urls "$PROBE_URLS" || die "Probe URLs must be comma-separated http/https URLs." || return 1
+  [[ "${PROBE_MODE}" == "tcp" || "${PROBE_MODE}" == "http" ]] || die "Probe mode must be tcp or http." || return 1
+  if [[ "${PROBE_MODE}" == "http" ]]; then
+    validate_probe_targets "$PROBE_TARGETS" || die "Probe targets must be comma-separated http/https URLs." || return 1
+  fi
   panel_login || die "Login test failed. Verify panel URL, username, and password." || return 1
 
   local tmp_cfg
@@ -682,15 +755,31 @@ validate_install_inputs() {
   rm -f "$tmp_cfg"
 }
 
-configure_probe_urls() {
-  local default_urls="${PROBE_URLS:-https://cp.cloudflare.com/generate_204,http://connectivitycheck.gstatic.com/generate_204,https://www.msftconnecttest.com/connecttest.txt}"
+configure_probe_mode() {
+  local mode
   while true; do
-    PROBE_URLS="$(prompt_nonempty 'Probe URLs (comma-separated, reachable through outbounds)' "$default_urls")"
-    PROBE_URLS="$(printf '%s' "$PROBE_URLS" | tr -d ' ')"
-    if validate_probe_urls "$PROBE_URLS"; then
-      break
-    fi
-    err "Please enter valid comma-separated http/https URLs."
+    read -r -p "Probe mode [tcp/http] [${PROBE_MODE:-tcp}]: " mode
+    mode="${mode:-${PROBE_MODE:-tcp}}"
+    mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    case "$mode" in
+      tcp)
+        PROBE_MODE="tcp"
+        PROBE_TARGETS=""
+        return 0
+        ;;
+      http)
+        PROBE_MODE="http"
+        while true; do
+          PROBE_TARGETS="$(prompt_nonempty 'HTTP probe URLs (comma-separated, reachable through outbounds)' "${PROBE_TARGETS:-https://cp.cloudflare.com/generate_204,http://connectivitycheck.gstatic.com/generate_204,https://www.msftconnecttest.com/connecttest.txt}")"
+          PROBE_TARGETS="$(printf '%s' "$PROBE_TARGETS" | tr -d ' ')"
+          if validate_probe_targets "$PROBE_TARGETS"; then
+            return 0
+          fi
+          err "Please enter valid comma-separated http/https URLs."
+        done
+        ;;
+      *) err "Please enter tcp or http." ;;
+    esac
   done
 }
 
@@ -710,7 +799,7 @@ interactive_install_or_reconfigure() {
     header
     say "${COL_GREEN}Install / Reconfigure${COL_RESET}"
     say "Leave password empty to keep the current saved password."
-    say "Use probe URLs reachable through your outbound path, not necessarily directly from the server."
+    say "Default probe mode is tcp, so no external URL is required."
     echo
 
     PANEL_URL="$(prompt_nonempty '3x-ui panel base URL' "${PANEL_URL:-http://127.0.0.1:2053}")"
@@ -739,14 +828,14 @@ interactive_install_or_reconfigure() {
     RECOVER_THRESHOLD="$(prompt_number 'Recover threshold (consecutive successes before switch back)' "${RECOVER_THRESHOLD:-2}")"
     MIN_SWITCH_GAP="$(prompt_number 'Minimum seconds between switches' "${MIN_SWITCH_GAP:-60}")"
     PROBE_TIMEOUT="$(prompt_number 'Probe timeout in seconds' "${PROBE_TIMEOUT:-8}")"
-    configure_probe_urls
+    configure_probe_mode
 
     mkdir -p "$INSTALL_DIR" "$ENV_DIR" "$STATE_DIR" "$LOG_DIR"
-    save_env
     write_systemd_files || { err "Could not write systemd files."; pause; continue; }
-    load_env
 
     if validate_install_inputs; then
+      save_env
+      load_env
       ln -sf "${INSTALL_DIR}/xui-switcher.sh" "$SYMLINK_PATH"
       success "Configuration saved."
       local cfg
@@ -775,9 +864,7 @@ interactive_install_or_reconfigure() {
     fi
 
     err "Configuration validation failed. Please review your input and try again."
-    if ! prompt_yes_no "Retry configuration now?" "Y"; then
-      return 1
-    fi
+    prompt_yes_no "Retry configuration now?" "Y" || return 1
   done
 }
 
@@ -788,53 +875,68 @@ show_current_config() {
   [[ -f "$ENV_FILE" ]] || die "Configuration not found." || return 1
 
   cat <<OUT
-Current settings
-----------------
-PANEL_URL          : ${PANEL_URL}
-PANEL_USERNAME     : ${PANEL_USERNAME}
-PANEL_PASSWORD     : $(mask_secret "$PANEL_PASSWORD")
-CONFIG_PATH        : ${CONFIG_PATH}
-XRAY_BIN           : ${XRAY_BIN}
-FAIL_THRESHOLD     : ${FAIL_THRESHOLD}
-RECOVER_THRESHOLD  : ${RECOVER_THRESHOLD}
-MIN_SWITCH_GAP     : ${MIN_SWITCH_GAP}
-PROBE_TIMEOUT      : ${PROBE_TIMEOUT}
-PROBE_URLS         : ${PROBE_URLS}
-ENV_FILE           : ${ENV_FILE}
-STATE_FILE         : ${STATE_FILE}
-SCRIPT_LOG         : ${SCRIPT_LOG}
-ACTION_LOG         : ${ACTION_LOG}
+Panel URL           : ${PANEL_URL:-not set}
+Panel Username      : ${PANEL_USERNAME:-not set}
+Panel Password      : $(mask_secret "${PANEL_PASSWORD:-}")
+Config Path         : ${CONFIG_PATH:-not set}
+Xray Binary         : ${XRAY_BIN:-not set}
+Fail Threshold      : ${FAIL_THRESHOLD:-not set}
+Recover Threshold   : ${RECOVER_THRESHOLD:-not set}
+Min Switch Gap      : ${MIN_SWITCH_GAP:-not set}
+Probe Timeout       : ${PROBE_TIMEOUT:-not set}
+Probe Mode          : ${PROBE_MODE:-tcp}
+Probe Targets       : ${PROBE_TARGETS:-not set}
+Env File            : ${ENV_FILE}
+State File          : ${STATE_FILE}
+Log File            : ${SCRIPT_LOG}
+Action Log          : ${ACTION_LOG}
 OUT
 
-  if [[ -f "$CONFIG_PATH" ]]; then
-    echo
-    echo "Current active outbound rule:"
-    jq -r '.routing.rules | [ .[] | select(has("outboundTag") and has("network")) ] | last' "$CONFIG_PATH"
-  fi
-
-  echo
-  echo "Detected prioritized tags from current config:"
   local cfg
   cfg="$(mktemp)"
   if panel_login && panel_get_config "$cfg"; then
+    echo
+    say "Detected prioritized tags:"
     show_detected_tags "$cfg" || true
   else
-    warn "Could not fetch tags from panel API right now."
+    echo
+    warn "Could not fetch config from panel right now."
   fi
   rm -f "$cfg"
-  return 0
 }
 
-validate_current_config() {
+validate_current_xray_config() {
   require_root || return 1
   load_env
-  [[ -f "$ENV_FILE" ]] || die "Configuration not found." || return 1
+  header
   validate_local_paths || return 1
   if validate_config "$CONFIG_PATH"; then
-    success "Xray config validation passed."
+    success "Current Xray config is valid."
     return 0
   fi
-  die "Xray config validation failed." || return 1
+  die "Current Xray config is NOT valid." || return 1
+}
+
+start_one_check_now() {
+  require_root || return 1
+  load_env
+  header
+  perform_failover_check
+}
+
+start_service_once() {
+  require_root || return 1
+  systemctl start "${APP_NAME}.service" && success "Service started once." || die "Could not start service." || return 1
+}
+
+stop_auto_run_timer() {
+  require_root || return 1
+  systemctl stop "${APP_NAME}.timer" && success "Timer stopped." || die "Could not stop timer." || return 1
+}
+
+restart_auto_run_timer() {
+  require_root || return 1
+  systemctl restart "${APP_NAME}.timer" && success "Timer restarted." || die "Could not restart timer." || return 1
 }
 
 show_status() {
@@ -847,62 +949,44 @@ show_status() {
 
 show_logs() {
   require_root || return 1
-  if [[ ! -f "$SCRIPT_LOG" ]]; then
-    warn "No log file yet: $SCRIPT_LOG"
-    return 0
+  header
+  if [[ -f "$SCRIPT_LOG" ]]; then
+    tail -n 100 "$SCRIPT_LOG"
+  else
+    warn "Log file not found yet: $SCRIPT_LOG"
   fi
-  tail -n 100 -f "$SCRIPT_LOG"
 }
 
-start_service() {
+enable_auto_run_timer() {
   require_root || return 1
-  systemctl start "${APP_NAME}.service" >/dev/null 2>&1 || return 1
-  success "Service executed once."
+  systemctl enable --now "${APP_NAME}.timer" && success "Timer enabled." || die "Could not enable timer." || return 1
 }
 
-stop_timer() {
+disable_auto_run_timer() {
   require_root || return 1
-  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
-  success "Timer stopped and disabled."
-}
-
-restart_timer() {
-  require_root || return 1
-  systemctl restart "${APP_NAME}.timer" >/dev/null 2>&1 || return 1
-  success "Timer restarted."
-}
-
-enable_timer() {
-  require_root || return 1
-  systemctl enable --now "${APP_NAME}.timer" >/dev/null 2>&1 || return 1
-  success "Timer enabled."
-}
-
-disable_timer() {
-  require_root || return 1
-  systemctl disable --now "${APP_NAME}.timer" >/dev/null 2>&1 || true
-  success "Timer disabled."
+  systemctl disable --now "${APP_NAME}.timer" && success "Timer disabled." || die "Could not disable timer." || return 1
 }
 
 uninstall_app() {
   require_root || return 1
-  if [[ -x "${INSTALL_DIR}/uninstall.sh" ]]; then
-    exec "${INSTALL_DIR}/uninstall.sh"
-  fi
-  die "uninstall.sh not found in ${INSTALL_DIR}" || return 1
+  prompt_yes_no "This will uninstall ${APP_NAME}. Continue?" "N" || return 0
+  bash "${INSTALL_DIR}/uninstall.sh"
 }
 
 menu_action() {
   local label="$1"
-  shift
-  if "$@"; then
-    return 0
+  local func="$2"
+  header
+  say "${COL_GREEN}${label}${COL_RESET}"
+  echo
+  if "$func"; then
+    success "Done."
+  elif [[ -n "$LAST_ERROR" ]]; then
+    err "$LAST_ERROR"
   fi
-  err "${label} failed. ${LAST_ERROR:-Review the output above.}"
-  return 1
 }
 
-menu() {
+main_menu() {
   while true; do
     header
     cat <<MENU
@@ -925,18 +1009,18 @@ MENU
     case "$choice" in
       1) menu_action "Install / Reconfigure" interactive_install_or_reconfigure; pause ;;
       2) menu_action "Show current config" show_current_config; pause ;;
-      3) menu_action "Validate current Xray config" validate_current_config; pause ;;
-      4) menu_action "Run health check" perform_failover_check && success "Check finished."; pause ;;
-      5) menu_action "Start service once" start_service; pause ;;
-      6) menu_action "Stop auto-run timer" stop_timer; pause ;;
-      7) menu_action "Restart auto-run timer" restart_timer; pause ;;
+      3) menu_action "Validate current Xray config" validate_current_xray_config; pause ;;
+      4) menu_action "Start one check now" start_one_check_now; pause ;;
+      5) menu_action "Start service once" start_service_once; pause ;;
+      6) menu_action "Stop auto-run timer" stop_auto_run_timer; pause ;;
+      7) menu_action "Restart auto-run timer" restart_auto_run_timer; pause ;;
       8) menu_action "Show status" show_status; pause ;;
-      9) show_logs ;;
-      10) menu_action "Enable auto-run timer" enable_timer; pause ;;
-      11) menu_action "Disable auto-run timer" disable_timer; pause ;;
-      12) uninstall_app ;;
+      9) menu_action "Show logs" show_logs; pause ;;
+      10) menu_action "Enable auto-run timer" enable_auto_run_timer; pause ;;
+      11) menu_action "Disable auto-run timer" disable_auto_run_timer; pause ;;
+      12) uninstall_app; return 0 ;;
       0) exit 0 ;;
-      *) err "Invalid choice. Please enter a valid menu number."; sleep 1 ;;
+      *) err "Invalid option. Please enter a valid menu number."; pause ;;
     esac
   done
 }
@@ -944,43 +1028,42 @@ MENU
 usage() {
   cat <<USAGE
 ${APP_NAME} ${APP_VERSION}
+
 Usage:
   ${APP_NAME}                 Open interactive menu
   ${APP_NAME} install         Install or reconfigure interactively
+  ${APP_NAME} reconfigure     Same as install
   ${APP_NAME} show-config     Show current saved configuration
-  ${APP_NAME} validate        Validate local Xray config
+  ${APP_NAME} validate        Validate current Xray config
   ${APP_NAME} run-now         Run one failover check now
-  ${APP_NAME} start           Start the systemd service once
-  ${APP_NAME} stop            Stop and disable the timer
-  ${APP_NAME} restart         Restart the timer
-  ${APP_NAME} status          Show systemd status
-  ${APP_NAME} logs            Tail the main log file
-  ${APP_NAME} enable          Enable and start the timer
-  ${APP_NAME} disable         Disable and stop the timer
-  ${APP_NAME} uninstall       Uninstall the application
-  ${APP_NAME} version         Show version
+  ${APP_NAME} start-once      Start the oneshot service now
+  ${APP_NAME} stop-timer      Stop the timer
+  ${APP_NAME} restart-timer   Restart the timer
+  ${APP_NAME} enable-timer    Enable and start the timer
+  ${APP_NAME} disable-timer   Disable and stop the timer
+  ${APP_NAME} status          Show service and timer status
+  ${APP_NAME} logs            Show recent logs
+  ${APP_NAME} uninstall       Uninstall ${APP_NAME}
 USAGE
 }
 
 main() {
-  local cmd="${1:-menu}"
-  case "$cmd" in
-    menu) menu ;;
+  case "${1:-menu}" in
+    menu) main_menu ;;
     install|reconfigure) interactive_install_or_reconfigure ;;
     show-config) show_current_config ;;
-    validate) validate_current_config ;;
+    validate) validate_current_xray_config ;;
     run-now) perform_failover_check ;;
-    start) start_service ;;
-    stop) stop_timer ;;
-    restart) restart_timer ;;
+    start-once) start_service_once ;;
+    stop-timer) stop_auto_run_timer ;;
+    restart-timer) restart_auto_run_timer ;;
+    enable-timer) enable_auto_run_timer ;;
+    disable-timer) disable_auto_run_timer ;;
     status) show_status ;;
     logs) show_logs ;;
-    enable) enable_timer ;;
-    disable) disable_timer ;;
     uninstall) uninstall_app ;;
-    version|--version|-v) echo "$APP_VERSION" ;;
-    help|--help|-h) usage ;;
-    *) usage; return 1 ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
   esac
 }
 
