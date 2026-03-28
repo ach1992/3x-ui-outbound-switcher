@@ -2,7 +2,7 @@
 set -Euo pipefail
 
 APP_NAME="3x-ui-outbound-switcher"
-APP_VERSION="v1.0.2"
+APP_VERSION="v1.0.3"
 REPO_URL="https://github.com/ach1992/3x-ui-outbound-switcher"
 RAW_BASE="https://raw.githubusercontent.com/ach1992/3x-ui-outbound-switcher/main"
 INSTALL_DIR="/opt/${APP_NAME}"
@@ -13,6 +13,7 @@ say() { printf '%b\n' "$*"; }
 info() { say "[INFO] $*"; }
 warn() { say "[WARN] $*"; }
 err() { say "[ERROR] $*"; }
+
 die() { err "$*"; exit 1; }
 
 require_root() {
@@ -22,7 +23,9 @@ require_root() {
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 ask_yes_no() {
-  local prompt="$1" default="${2:-Y}" value alt
+  local prompt="$1"
+  local default="${2:-Y}"
+  local value alt
   if [[ "${default^^}" == "Y" ]]; then alt="N"; else alt="Y"; fi
   while true; do
     read -r -p "$prompt [$default/$alt]: " value
@@ -35,21 +38,14 @@ ask_yes_no() {
   done
 }
 
-ensure_package_installed() {
-  local pkg="$1"
-  dpkg -s "$pkg" >/dev/null 2>&1 && return 0
-  info "Installing dependency: $pkg"
-  if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
-    return 0
-  fi
-  info "Refreshing package index once..."
-  apt-get update >/dev/null 2>&1 || return 1
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1 || return 1
-}
-
 ensure_basic_tools() {
   command_exists apt-get || die "This installer supports Debian and Ubuntu only."
-  command_exists curl || ensure_package_installed curl || die "Failed to install curl."
+  if ! command_exists curl; then
+    info "Installing curl..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl >/dev/null 2>&1 \
+      || { apt-get update >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl >/dev/null 2>&1; } \
+      || die "Failed to install curl."
+  fi
 }
 
 copy_from_dir() {
@@ -76,7 +72,9 @@ install_offline() {
   copy_from_dir "$OFFLINE_DIR"
 }
 
-cleanup() { rm -rf "$TMP_DIR"; }
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
 trap cleanup EXIT
 
 main() {
@@ -102,7 +100,8 @@ main() {
   fi
 
   ln -sf "$INSTALL_DIR/xui-switcher.sh" "/usr/local/bin/${APP_NAME}"
-  say "[OK] Installed successfully. Starting interactive setup..."
+  success_msg="Installed successfully. Starting interactive setup..."
+  say "[OK] ${success_msg}"
   exec "$INSTALL_DIR/xui-switcher.sh" install
 }
 
